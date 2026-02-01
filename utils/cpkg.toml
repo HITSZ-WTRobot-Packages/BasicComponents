@@ -1,0 +1,4 @@
+name = "utils"
+pkgname = "utils"
+version = "0.1.0"
+dependencies = ["stm32cubemx"]

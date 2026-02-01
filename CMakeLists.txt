@@ -13,3 +13,5 @@ add_subdirectory(libs/mit_pd)
 add_subdirectory(libs/printf)
 
 add_subdirectory(services/watchdog)
+
+add_subdirectory(utils)
