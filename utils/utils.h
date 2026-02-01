@@ -34,6 +34,14 @@ static void delay_us(const uint32_t us)
                 return &inst;                                                                      \
             }())
 
+#define static_new_with_vars(vars, expr)                                                           \
+    (                                                                                              \
+            [vars]()                                                                               \
+            {                                                                                      \
+                static auto inst = (expr);                                                         \
+                return &inst;                                                                      \
+            }())
+
 #ifdef __cplusplus
 }
 #endif
