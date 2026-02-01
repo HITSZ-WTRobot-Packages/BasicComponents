@@ -1,0 +1,4 @@
+name = "UartRxSync"
+pkgname = "protocol::UartRxSync"
+version = "0.1.0"
+dependencies = ["stm32cubemx", "services::Watchdog"]

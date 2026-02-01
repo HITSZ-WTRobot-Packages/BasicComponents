@@ -14,4 +14,6 @@ add_subdirectory(libs/printf)
 
 add_subdirectory(services/watchdog)
 
+add_subdirectory(protocol/UartRxSync)
+
 add_subdirectory(utils)
