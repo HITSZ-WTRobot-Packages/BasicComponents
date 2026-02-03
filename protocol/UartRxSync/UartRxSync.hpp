@@ -194,12 +194,12 @@ template <size_t HeaderLen, size_t FrameLen> bool UartRxSync<HeaderLen, FrameLen
 {
     auto& hdr = header();
 
-    const size_t first_len = HeaderLen - hdr_idx_; // tail 到 buffer 末尾
-    for (size_t i = 0; i < first_len; ++i)
+    const size_t first_len = HeaderLen - hdr_idx_ - 1; // tail + 1 到 buffer 末尾
+    for (size_t i = 1; i <= first_len; ++i)
         if (rx_buffer_[hdr_idx_ + i] != hdr[i])
             return false;
 
-    for (size_t i = 0; i < hdr_idx_; ++i)
+    for (size_t i = 0; i <= hdr_idx_; ++i)
         if (rx_buffer_[i] != hdr[first_len + i])
             return false;
 
