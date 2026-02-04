@@ -26,22 +26,6 @@ static void delay_us(const uint32_t us)
     );
 }
 
-#define static_new(expr)                                                                           \
-    (                                                                                              \
-            []()                                                                                   \
-            {                                                                                      \
-                static auto inst = (expr);                                                         \
-                return &inst;                                                                      \
-            }())
-
-#define static_new_with_vars(vars, expr)                                                           \
-    (                                                                                              \
-            [vars]()                                                                               \
-            {                                                                                      \
-                static auto inst = (expr);                                                         \
-                return &inst;                                                                      \
-            }())
-
 #ifdef __cplusplus
 }
 #endif
