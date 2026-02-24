@@ -1,0 +1,3 @@
+name = "RingBuffer"
+pkgname = "libs::RingBuffer"
+version = "0.1.0"
