@@ -14,6 +14,8 @@ add_subdirectory(libs/printf)
 add_subdirectory(libs/ring_buffer)
 add_subdirectory(libs/crc)
 
+add_subdirectory(libs/fixed_map)
+
 add_subdirectory(services/watchdog)
 
 add_subdirectory(protocol/UartRxSync)
