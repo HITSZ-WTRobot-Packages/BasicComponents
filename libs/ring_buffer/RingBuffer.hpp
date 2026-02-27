@@ -5,10 +5,9 @@
  * @brief   a ring buffer
  */
 #pragma once
+
 namespace libs
 {
-
-#pragma once
 #include <cstddef>
 #include <cstdint>
 
