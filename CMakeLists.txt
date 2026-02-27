@@ -12,6 +12,7 @@ add_subdirectory(libs/pid_pd)
 add_subdirectory(libs/mit_pd)
 add_subdirectory(libs/printf)
 add_subdirectory(libs/ring_buffer)
+add_subdirectory(libs/crc)
 
 add_subdirectory(services/watchdog)
 
