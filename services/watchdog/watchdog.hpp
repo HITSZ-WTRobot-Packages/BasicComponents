@@ -14,7 +14,7 @@ namespace service
 {
 
 #ifndef MAX_WATCHDOG_NUM
-#    define MAX_WATCHDOG_NUM (24)
+#    define MAX_WATCHDOG_NUM (64)
 #endif
 
 #define WATCHDOG_SNACKS (10)
@@ -26,9 +26,14 @@ public:
     ~Watchdog();
     void feed();
     void eat();
-    bool isFed() const;
+
+    [[nodiscard]] bool isFed() const;
+
+    Watchdog(Watchdog&)  = delete;
+    Watchdog(Watchdog&&) = delete;
 
     static void EatAll();
+    static bool isFull();
 
 private:
     std::atomic_int32_t snacks_{ 0 };

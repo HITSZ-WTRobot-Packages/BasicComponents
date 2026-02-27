@@ -55,4 +55,9 @@ void Watchdog::EatAll()
         watchdogs[i]->eat();
 }
 
+bool Watchdog::isFull()
+{
+    return watchdog_count.load(std::memory_order_relaxed) == MAX_WATCHDOG_NUM;
+}
+
 } // namespace service
