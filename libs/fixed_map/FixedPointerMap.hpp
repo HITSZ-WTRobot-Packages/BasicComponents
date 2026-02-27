@@ -10,7 +10,7 @@
 template <typename K, typename V, size_t N> class FixedPointerMap
 {
 public:
-    bool insert(const K& key, const V* value)
+    bool insert(const K& key, V* value)
     {
         // if key exists, return false;
         for (size_t i = 0; i < size_; ++i)
@@ -35,7 +35,7 @@ public:
     {
         for (size_t i = 0; i < size_; ++i)
             if (data_[i].first == key)
-                return &data_[i].second;
+                return data_[i].second;
         return nullptr;
     }
 
@@ -53,7 +53,7 @@ public:
         return false;
     }
 
-    size_t size() const { return size_; }
+    [[nodiscard]] size_t size() const { return size_; }
 
 private:
     std::pair<K, V*> data_[N];
