@@ -6,6 +6,7 @@
  */
 #ifndef PID_MOTOR_HPP
 #define PID_MOTOR_HPP
+#include <cmath>
 
 class PIDMotor
 {
@@ -23,10 +24,11 @@ public:
 
     float calc(const float& ref, const float& fdb);
     void  setConfig(const Config& cfg) { cfg_ = cfg; }
+    void  setOutputMax(const float output_max) { cfg_.abs_output_max = std::fabsf(output_max); }
     void  reset();
 
-    float getRef() const { return ref_; }
-    float getOutput() const { return output_; }
+    [[nodiscard]] float getRef() const { return ref_; }
+    [[nodiscard]] float getOutput() const { return output_; }
 
 private:
     Config cfg_{};
