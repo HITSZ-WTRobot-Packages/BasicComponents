@@ -9,7 +9,6 @@
 namespace libs
 {
 #include <cstddef>
-#include <cstdint>
 
 template <typename T, std::size_t Capacity> class RingBuffer
 {
@@ -31,10 +30,7 @@ public:
     bool full() const noexcept;
 
     std::size_t           size() const noexcept;
-    constexpr std::size_t capacity() const noexcept
-    {
-        return Capacity - 1;
-    }
+    constexpr std::size_t capacity() const noexcept { return Capacity - 1; }
 
 private:
     alignas(T) T buffer_[Capacity];
@@ -43,10 +39,7 @@ private:
     volatile std::size_t tail_{ 0 };
 
 private:
-    static constexpr std::size_t next(std::size_t idx) noexcept
-    {
-        return (idx + 1) % Capacity;
-    }
+    static constexpr std::size_t next(std::size_t idx) noexcept { return (idx + 1) % Capacity; }
 };
 template <typename T, std::size_t Capacity>
 bool RingBuffer<T, Capacity>::push(const T& value) noexcept
