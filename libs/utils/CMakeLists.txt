@@ -1,0 +1,4 @@
+add_subdirectory(crc)
+add_subdirectory(fixed_map)
+add_subdirectory(printf)
+add_subdirectory(ring_buffer)

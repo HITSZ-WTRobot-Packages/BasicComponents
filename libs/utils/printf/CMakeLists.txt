@@ -1,10 +1,10 @@
 add_library(LibsPrintf STATIC
-    "./printf.c"
+        "printf.c"
 )
 
 target_include_directories(LibsPrintf
-    PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+        PUBLIC
+        .
 )
 
 # link dependencies if any

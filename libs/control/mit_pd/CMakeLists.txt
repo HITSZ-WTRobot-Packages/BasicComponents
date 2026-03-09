@@ -1,10 +1,10 @@
 add_library(LibsMITPD STATIC
-    "./mit_pd.cpp"
+        "mit_pd.cpp"
 )
 
 target_include_directories(LibsMITPD
-    PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+        PUBLIC
+        .
 )
 
 # link dependencies if any

@@ -1,7 +1,7 @@
 add_library(__libs_CRC INTERFACE)
 
 target_include_directories(__libs_CRC INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}
+        .
 )
 
 # link dependencies if any

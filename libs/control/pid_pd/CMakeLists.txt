@@ -1,10 +1,10 @@
 add_library(LibsPIDPD STATIC
-    "./pid_pd.cpp"
+        "pid_pd.cpp"
 )
 
 target_include_directories(LibsPIDPD
-    PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+        PUBLIC
+        .
 )
 
 # link dependencies if any

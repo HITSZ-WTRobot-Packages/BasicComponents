@@ -8,14 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_subdirectory(bsp/can_driver)
 add_subdirectory(bsp/gpio_driver)
 
-add_subdirectory(libs/pid_motor)
-add_subdirectory(libs/pid_pd)
-add_subdirectory(libs/mit_pd)
-add_subdirectory(libs/printf)
-add_subdirectory(libs/ring_buffer)
-add_subdirectory(libs/crc)
-
-add_subdirectory(libs/fixed_map)
+add_subdirectory(libs/control)
+add_subdirectory(libs/utils)
 
 add_subdirectory(services/watchdog)
 

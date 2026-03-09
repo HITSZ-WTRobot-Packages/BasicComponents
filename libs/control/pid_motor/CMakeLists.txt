@@ -1,10 +1,10 @@
 add_library(LibsPIDMotor STATIC
-    "./pid_motor.cpp"
+        "pid_motor.cpp"
 )
 
 target_include_directories(LibsPIDMotor
-    PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+        PUBLIC
+        .
 )
 
 # link dependencies if any
