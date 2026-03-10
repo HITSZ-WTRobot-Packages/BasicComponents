@@ -10,6 +10,7 @@ add_subdirectory(bsp/gpio_driver)
 
 add_subdirectory(libs/control)
 add_subdirectory(libs/utils)
+add_subdirectory(libs/math)
 
 add_subdirectory(services/watchdog)
 
