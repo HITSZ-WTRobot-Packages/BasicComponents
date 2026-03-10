@@ -29,7 +29,8 @@ template <typename T> struct Pose
 
     constexpr Pose(const Vec3& p, const Quaternion<T>& q) : pos(p), rot(q) {}
 
-    constexpr Pose(const Vec3& p, const EulerZYX<T>& e) : pos(p), rot(e) {}
+    constexpr Pose(const Vec3& p, const EulerZYX<T, unit::Rad>& e) : pos(p), rot(e) {}
+    constexpr Pose(const Vec3& p, const EulerZYX<T, unit::Deg>& e) : pos(p), rot(e) {}
 
     /* identity */
     static inline Pose Identity() { return Pose(Vec3(T(0), T(0), T(0)), Quaternion<T>()); }
