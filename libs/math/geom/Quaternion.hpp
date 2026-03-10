@@ -12,7 +12,7 @@
 
 namespace math
 {
-template <typename T> struct EulerZYX;
+template <typename T, typename AngleUnit> struct EulerZYX;
 
 template <typename T> struct Quaternion
 {
@@ -57,31 +57,14 @@ template <typename T> struct Quaternion
         return v + t * w + qv.cross(t);
     }
 
-    inline EulerZYX<T> toEulerZYX()
+    template <typename AngleUnit> explicit Quaternion(const EulerZYX<T, AngleUnit>& _e)
     {
         EulerZYX<T> e;
-        // pitch (Y)
-        const T sinp = T(2) * (w * y - z * x);
-        if (std::abs(sinp) >= T(1))
-        {
-            e.pitch = std::copysign(T(M_PI) / T(2), sinp); // gimbal lock
-        }
+        if constexpr (std::is_same_v<AngleUnit, unit::Deg>)
+            e = _e.toRad();
         else
-        {
-            e.pitch = std::asin(sinp);
-        }
+            e = _e;
 
-        // roll (X)
-        e.roll = std::atan2(T(2) * (w * x + y * z), T(1) - T(2) * (x * x + y * y));
-
-        // yaw (Z)
-        e.yaw = std::atan2(T(2) * (w * z + x * y), T(1) - T(2) * (y * y + z * z));
-
-        return e;
-    }
-
-    explicit Quaternion(const EulerZYX<T>& e)
-    {
         // roll-pitch-yaw (ZYX)
         const T cr = cos(e.roll * T(0.5));
         const T sr = sin(e.roll * T(0.5));
