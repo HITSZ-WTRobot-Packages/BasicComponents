@@ -1,0 +1,3 @@
+name = "Deque"
+pkgname = "libs::Deque"
+version = "0.1.0"

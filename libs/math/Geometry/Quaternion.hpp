@@ -4,7 +4,7 @@
  * @date    2026-03-09
  */
 #pragma once
-#include "Vec.hpp"
+#include "../LinearAlgebra/Vec.hpp"
 #include <cmath>
 #ifndef M_PI
 #    define M_PI 3.14159265358979323846
