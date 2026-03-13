@@ -20,43 +20,45 @@ namespace math::ekf
  */
 template <typename T, size_t StateDim> struct EKF
 {
-public:
     using MatS = Mat<T, StateDim, StateDim>;
     using VecS = Vec<T, StateDim>;
 
-    VecS state{}; // state
-    MatS P{};     // 协方差矩阵
-    MatS Q{};     // 过程噪声
+    VecS x{}; // state
+    MatS P{}; // 协方差矩阵
+    MatS Q{}; // 过程噪声
 
     EKF() = default;
 
     EKF(const VecS& X_init, const MatS& P_init, const MatS& Q_init) :
-        state(X_init), P(P_init), Q(Q_init)
+        x(X_init), P(P_init), Q(Q_init)
     {
     }
 
-    /* --- 预测 --- */
     /**
      * 预测
-     * @tparam FFunc 预测函数模板类
      * @param predicted_x 预测步 x 结果
      * @param F Jacobian 矩阵，\partial{f}/\partial{x}
      */
     constexpr void predict(const VecS& predicted_x, const MatS& F)
     {
-        state = std::move(predicted_x);
-        P     = F * P * F.transpose() + Q;
+        x = std::move(predicted_x);
+        P = F * P * F.transpose() + Q;
     }
 
-    /* 观测更新 */
-    template <typename FFunc, size_t MeasDim>
-    constexpr void update(const Vec<T, MeasDim>&           z,
-                          FFunc                            h,
+    /**
+     * 观测更新
+     * @tparam MeasDim 测量维度
+     * @param y y = z - h(x); h 为观测函数
+     * @param H h 对 x 的 Jacobian 矩阵在当前 x 的值
+     * @param R 测量噪声
+     */
+    template <size_t MeasDim>
+    constexpr void update(const Vec<T, MeasDim>&           y,
                           const Mat<T, MeasDim, StateDim>& H,
                           const Mat<T, MeasDim, MeasDim>&  R)
     {
         // innovation
-        const auto y = z - h(state);
+        // const auto y = z - h(x);
 
         // innovation covariance S = H^T * P^T * H + R
         const auto S = H * P * H.transpose() + R;
@@ -65,7 +67,7 @@ public:
         const auto K = P * H.transpose() * S.inverse();
 
         // state update
-        state += K * y;
+        x += K * y;
 
         P -= K * H * P;
     }
