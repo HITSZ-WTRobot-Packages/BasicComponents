@@ -136,11 +136,10 @@ template <typename T, size_t Rows, size_t Cols> struct Mat
     template <size_t OtherCols>
     constexpr Mat<T, Rows, OtherCols> operator*(const Mat<T, Cols, OtherCols>& o) const
     {
-        Mat<T, Rows, OtherCols> r{};
+        Mat<T, Rows, OtherCols> r = Mat<T, Rows, OtherCols>::zero();
         for (size_t i = 0; i < Rows; ++i)
             for (size_t j = 0; j < OtherCols; ++j)
             {
-                r[i][j] = T(0);
                 for (size_t k = 0; k < Cols; ++k)
                     r[i][j] += data[i][k] * o.data[k][j];
             }
