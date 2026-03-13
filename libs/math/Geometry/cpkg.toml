@@ -1,0 +1,4 @@
+name = "Geometry"
+pkgname = "Math::Geometry"
+version = "0.1.0"
+dependencies = ["Math::LinearAlgebra"]
