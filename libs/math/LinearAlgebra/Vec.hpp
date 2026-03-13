@@ -38,6 +38,12 @@ template <typename T, size_t N> struct Vec
             res[i] = data[i] + other[i];
         return res;
     }
+    constexpr Vec& operator+=(const Vec& other)
+    {
+        for (size_t i = 0; i < N; ++i)
+            data[i] += other[i];
+        return *this;
+    }
 
     // subtraction
     constexpr Vec operator-(const Vec& other) const
@@ -46,6 +52,12 @@ template <typename T, size_t N> struct Vec
         for (size_t i = 0; i < N; ++i)
             res[i] = data[i] - other[i];
         return res;
+    }
+    constexpr Vec& operator-=(const Vec& other)
+    {
+        for (size_t i = 0; i < N; ++i)
+            data[i] -= other[i];
+        return *this;
     }
 
     // scalar multiply
@@ -56,6 +68,12 @@ template <typename T, size_t N> struct Vec
             res[i] = data[i] * s;
         return res;
     }
+    constexpr Vec& operator*=(T s) const
+    {
+        for (size_t i = 0; i < N; ++i)
+            data[i] *= s;
+        return *this;
+    }
 
     // scalar divide
     constexpr Vec operator/(T s) const
@@ -64,6 +82,12 @@ template <typename T, size_t N> struct Vec
         for (size_t i = 0; i < N; ++i)
             res[i] = data[i] / s;
         return res;
+    }
+    constexpr Vec& operator/=(T s) const
+    {
+        for (size_t i = 0; i < N; ++i)
+            data[i] /= s;
+        return *this;
     }
 
     // dot product
@@ -75,7 +99,6 @@ template <typename T, size_t N> struct Vec
         return res;
     }
 
-    // norm (requires C++20 for constexpr sqrt)
     constexpr T norm() const { return std::sqrt(dot(*this)); }
 
     constexpr Vec normalize() const
@@ -102,6 +125,27 @@ template <typename T> struct Vec<T, 3>
     constexpr Vec operator*(T s) const { return Vec(x * s, y * s, z * s); }
     constexpr Vec operator/(T s) const { return Vec(x / s, y / s, z / s); }
 
+    constexpr Vec& operator+=(const Vec& o)
+    {
+        x += o.x, y += o.y, z += o.z;
+        return *this;
+    }
+    constexpr Vec& operator-=(const Vec& o)
+    {
+        x -= o.x, y -= o.y, z -= o.z;
+        return *this;
+    }
+    constexpr Vec& operator*=(T s) const
+    {
+        x *= s, y *= s, z *= s;
+        return *this;
+    }
+    constexpr Vec& operator/=(T s) const
+    {
+        x /= s, y /= s, z /= s;
+        return *this;
+    }
+
     // dot & cross
     constexpr T   dot(const Vec& o) const { return x * o.x + y * o.y + z * o.z; }
     constexpr Vec cross(const Vec& o) const
@@ -115,7 +159,75 @@ template <typename T> struct Vec<T, 3>
     static constexpr Vec zero() { return Vec(0, 0, 0); }
 };
 
+// Vec2 specialization for planar kinematics
+template <typename T> struct Vec<T, 2>
+{
+    T x{}, y{};
+
+    constexpr Vec() : x(0), y(0) {}
+    constexpr Vec(T x_, T y_) : x(x_), y(y_) {}
+
+    // element access
+    constexpr T&       operator[](size_t i) { return i == 0 ? x : y; }
+    constexpr const T& operator[](size_t i) const { return i == 0 ? x : y; }
+
+    // arithmetic
+    constexpr Vec operator+(const Vec& o) const { return Vec(x + o.x, y + o.y); }
+    constexpr Vec operator-(const Vec& o) const { return Vec(x - o.x, y - o.y); }
+    constexpr Vec operator*(T s) const { return Vec(x * s, y * s); }
+    constexpr Vec operator/(T s) const { return Vec(x / s, y / s); }
+
+    constexpr Vec& operator+=(const Vec& o)
+    {
+        x += o.x, y += o.y;
+        return *this;
+    }
+    constexpr Vec& operator-=(const Vec& o)
+    {
+        x -= o.x, y -= o.y;
+        return *this;
+    }
+    constexpr Vec& operator*=(T s) const
+    {
+        x *= s, y *= s;
+        return *this;
+    }
+    constexpr Vec& operator/=(T s) const
+    {
+        x /= s, y /= s;
+        return *this;
+    }
+
+    // dot product
+    constexpr T dot(const Vec& o) const { return x * o.x + y * o.y; }
+
+    // norm
+    constexpr T norm() const { return std::hypot(x, y); }
+
+    constexpr Vec normalize() const { return (*this) / norm(); }
+
+    // perpendicular vector (90 deg CCW)
+    // used in omega × r
+    constexpr Vec perp() const { return Vec(-y, x); }
+
+    // rotate by yaw (rad)
+    constexpr Vec rotate(T yaw) const
+    {
+        T c = std::cos(yaw);
+        T s = std::sin(yaw);
+        return Vec(c * x - s * y, s * x + c * y);
+    }
+
+    static constexpr Vec zero() { return Vec(0, 0); }
+};
+
 using Vec3f = Vec<float, 3>;
 using Vec3d = Vec<double, 3>;
+
+using Vec2f = Vec<float, 2>;
+using Vec2d = Vec<double, 2>;
+
+template <size_t N> using Vecf = Vec<float, N>;
+template <size_t N> using Vecd = Vec<double, N>;
 
 } // namespace math
