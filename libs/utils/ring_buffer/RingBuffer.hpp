@@ -19,21 +19,85 @@ public:
 
     // push element into buffer
     // return false if buffer full
-    bool push(const T& value) noexcept;
+    bool push(const T& value) noexcept
+    {
+        const std::size_t next_head = next(head_);
+
+        // buffer full
+        if (next_head == tail_)
+            return false;
+
+        buffer_[head_] = value;
+
+        // publish after write
+        head_ = next_head;
+        return true;
+    }
+
+    // push element with builder
+    template <typename Builder,
+              typename = std::enable_if_t<std::is_same_v<void, std::invoke_result_t<Builder, T&>>>>
+    bool push(Builder&& builder) noexcept
+    {
+        const std::size_t next_head = next(head_);
+        if (next_head == tail_)
+            return false;
+        builder(buffer_[head_]);
+        head_ = next_head;
+        return true;
+    }
+
+    T* emplace() noexcept
+    {
+        const auto next_head = next(head_);
+
+        // buffer full
+        if (next_head == tail_)
+            return nullptr;
+
+        T* out = &buffer_[head_];
+
+        head_ = next_head;
+        return out;
+    }
 
     // pop element from buffer
     // return false if buffer empty
-    bool pop(T& out) noexcept;
+    bool pop(T& out) noexcept
+    {
+        // buffer empty
+        if (head_ == tail_)
+            return false;
+
+        out = buffer_[tail_];
+
+        tail_ = next(tail_);
+        return true;
+    }
+
+    // pop element ptr from buffer
+    // return nullptr if buffer empty
+    T* pop() noexcept
+    {
+        if (head_ == tail_)
+            return nullptr;
+        T* out = &buffer_[tail_];
+        tail_  = next(tail_);
+        return out;
+    }
 
     // utilities
-    bool empty() const noexcept;
-    bool full() const noexcept;
+    [[nodiscard]] bool empty() const noexcept { return head_ == tail_; }
+    [[nodiscard]] bool full() const noexcept { return next(head_) == tail_; }
 
-    std::size_t           size() const noexcept;
-    constexpr std::size_t capacity() const noexcept
+    [[nodiscard]] std::size_t size() const noexcept
     {
-        return Capacity - 1;
+        if (head_ >= tail_)
+            return head_ - tail_;
+        return Capacity - (tail_ - head_);
     }
+
+    static constexpr std::size_t capacity() noexcept { return Capacity - 1; }
 
 private:
     alignas(T) T buffer_[Capacity];
@@ -42,55 +106,10 @@ private:
     volatile std::size_t tail_{ 0 };
 
 private:
-    static constexpr std::size_t next(std::size_t idx) noexcept
+    static constexpr std::size_t next(const std::size_t idx) noexcept
     {
         return (idx + 1) % Capacity;
     }
 };
-template <typename T, std::size_t Capacity>
-bool RingBuffer<T, Capacity>::push(const T& value) noexcept
-{
-    const std::size_t next_head = next(head_);
-
-    // buffer full
-    if (next_head == tail_)
-        return false;
-
-    buffer_[head_] = value;
-
-    // publish after write
-    head_ = next_head;
-    return true;
-}
-
-template <typename T, std::size_t Capacity> bool RingBuffer<T, Capacity>::pop(T& out) noexcept
-{
-    // buffer empty
-    if (head_ == tail_)
-        return false;
-
-    out = buffer_[tail_];
-
-    tail_ = next(tail_);
-    return true;
-}
-
-template <typename T, std::size_t Capacity> bool RingBuffer<T, Capacity>::empty() const noexcept
-{
-    return head_ == tail_;
-}
-
-template <typename T, std::size_t Capacity> bool RingBuffer<T, Capacity>::full() const noexcept
-{
-    return next(head_) == tail_;
-}
-
-template <typename T, std::size_t Capacity>
-std::size_t RingBuffer<T, Capacity>::size() const noexcept
-{
-    if (head_ >= tail_)
-        return head_ - tail_;
-    return Capacity - (tail_ - head_);
-}
 
 } // namespace libs
