@@ -24,7 +24,7 @@
  * using CRC32 = crc::CRCX<32, 0x04C11DB7, 0xFFFFFFFF, true, true, 0xFFFFFFFF>;
  *
  * // CRC-32C
- * using CRC32C = crc::CRCX< 2, 0x1EDC6F41, 0xFFFFFFFF, true, true, 0xFFFFFFFF>;
+ * using CRC32C = crc::CRCX<32, 0x1EDC6F41, 0xFFFFFFFF, true, true, 0xFFFFFFFF>;
  *
  * // CRC-64/ECMA
  * using CRC64_ECMA = crc::CRCX<64,
