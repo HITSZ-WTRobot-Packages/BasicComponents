@@ -13,24 +13,26 @@
 #include <cstddef>
 #include <cstring>
 
+#ifndef HAL_UART_MODULE_ENABLED
+#    error "HAL UART module is not enabled. Enable HAL_UART_MODULE_ENABLED in stm32xxxx_hal_conf.h"
+#endif
+
 namespace protocol
 {
 
-#define UartRxSync_DefineCallback(__obj__)                                                         \
-    void __obj__##_UartRxSync_Callback(UART_HandleTypeDef* huart)                                  \
-    {                                                                                              \
-        (__obj__)->receiveCallback();                                                              \
-    }                                                                                              \
-    void __obj__##_UartRxSync_ErrorHandler(UART_HandleTypeDef* huart)                              \
-    {                                                                                              \
-        (__obj__)->errorHandler();                                                                 \
-    }
+/**
+ * @deprecated 无须使用此宏函数，直接调用 RegisterCallback 即可
+ * @param __obj__ uart rx sync pointer
+ */
+#define UartRxSync_DefineCallback(__obj__)
 
 #define UartRxSync_RegisterCallback(__obj__, __huart__)                                            \
     HAL_UART_RegisterCallback((__huart__),                                                         \
                               HAL_UART_RX_COMPLETE_CB_ID,                                          \
-                              __obj__##_UartRxSync_Callback);                                      \
-    HAL_UART_RegisterCallback((__huart__), HAL_UART_ERROR_CB_ID, __obj__##_UartRxSync_ErrorHandler)
+                              [](UART_HandleTypeDef* huart) { (__obj__)->receiveCallback(); });    \
+    HAL_UART_RegisterCallback((__huart__),                                                         \
+                              HAL_UART_ERROR_CB_ID,                                                \
+                              [](UART_HandleTypeDef* huart) { (__obj__)->errorHandler(); })
 
 /**
  * 带帧头同步功能的串口接收器，基于中断和 DMA
