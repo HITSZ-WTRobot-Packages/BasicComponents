@@ -169,6 +169,8 @@ protected:
     virtual const std::array<uint8_t, HeaderLen>& header() const                                = 0;
     virtual bool decode(const uint8_t data[DecodeWithHeader ? FrameLen : FrameLen - HeaderLen]) = 0;
 
+    virtual uint32_t timeout() const { return 10; }
+
 private:
     UART_HandleTypeDef* huart_;
 
@@ -213,7 +215,7 @@ private:
 
         if (decode(data))
         {
-            watchdog_.feed();
+            watchdog_.feed(timeout());
 #ifdef DEBUG
             ++decode_success_cnt;
 #endif
