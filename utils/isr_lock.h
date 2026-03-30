@@ -20,3 +20,20 @@ static void isr_unlock(uint32_t primask)
     __set_PRIMASK(primask);
 }
 }
+
+#ifdef __cplusplus
+class ISRGuard
+{
+public:
+    ISRGuard() { primask = isr_lock(); }
+    ~ISRGuard() { isr_unlock(primask); }
+
+    ISRGuard(const ISRGuard&)            = delete;
+    ISRGuard& operator=(const ISRGuard&) = delete;
+    ISRGuard(ISRGuard&&)                 = delete;
+    ISRGuard& operator=(ISRGuard&&)      = delete;
+
+private:
+    uint32_t primask;
+};
+#endif
