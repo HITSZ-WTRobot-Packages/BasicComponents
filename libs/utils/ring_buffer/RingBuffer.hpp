@@ -11,7 +11,7 @@
 namespace libs
 {
 
-template <typename T, std::size_t Capacity> class RingBuffer
+template <typename T, std::size_t Capacity, bool Overwrite = false> class RingBuffer
 {
     static_assert(Capacity >= 2, "capacity must be >= 2");
 
@@ -19,14 +19,22 @@ public:
     RingBuffer() = default;
 
     // push element into buffer
-    // return false if buffer full
     bool push(const T& value) noexcept
     {
         const std::size_t next_head = next(head_);
 
-        // buffer full
         if (next_head == tail_)
-            return false;
+        {
+            if constexpr (Overwrite)
+            {
+                // overwrite oldest
+                tail_ = next(tail_);
+            }
+            else
+            {
+                return false;
+            }
+        }
 
         buffer_[head_] = value;
 
@@ -42,7 +50,12 @@ public:
     {
         const std::size_t next_head = next(head_);
         if (next_head == tail_)
-            return false;
+        {
+            if constexpr (Overwrite)
+                tail_ = next(tail_);
+            else
+                return false;
+        }
         builder(buffer_[head_]);
         head_ = next_head;
         return true;
@@ -50,11 +63,14 @@ public:
 
     T* emplace() noexcept
     {
-        const auto next_head = next(head_);
-
-        // buffer full
+        const std::size_t next_head = next(head_);
         if (next_head == tail_)
-            return nullptr;
+        {
+            if constexpr (Overwrite)
+                tail_ = next(tail_);
+            else
+                return nullptr;
+        }
 
         T* out = &buffer_[head_];
 
