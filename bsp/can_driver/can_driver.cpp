@@ -1,5 +1,5 @@
 /**
- * @file    can_driver.c
+ * @file    can_driver.cpp
  * @author  syhanjin
  * @date    2025-09-04
  * @brief
@@ -18,45 +18,46 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * Project repository: https://github.com/HITSZ-WTRobot/bsp_drivers
+ * Project repository: https://github.com/HITSZ-WTRobot-Packages/BasicComponents
  */
-#include "can_driver.h"
+#include "can_driver.hpp"
 
-#ifdef __cplusplus
-extern "C"
+#include "RingBuffer.hpp"
+#include "isr_lock.h"
+
+#include <cassert>
+#include <cstring>
+
+namespace
 {
-#endif
 
-#ifdef USE_RTOS
-#    include "cmsis_os2.h"
-static osMutexId_t can_mutex = NULL;
-static osMutexId_t get_can_mutex()
+struct CAN_MessageDef
 {
-    if (can_mutex == NULL)
-        can_mutex = osMutexNew(&(osMutexAttr_t) { .name = "can_mutex" });
-    return can_mutex;
-}
-#else
-#    include "cmsis_compiler.h"
-#endif
-typedef struct
+    CAN_TxHeaderTypeDef header;
+    uint8_t             data[8];
+};
+
+struct CAN_CallbackMap
 {
-    CAN_HandleTypeDef*        hcan;
-    CAN_FifoReceiveCallback_t callbacks[CAN_MAX_CALLBACK_NUM];
-    uint32_t                  callback_count;
-} CAN_CallbackMap;
+    CAN_HandleTypeDef*        hcan{ nullptr };
+    CAN_FifoReceiveCallback_t callbacks[CAN_MAX_CALLBACK_NUM]{};
+    uint32_t                  callback_count{ 0 };
 
-static CAN_CallbackMap maps[CAN_NUM];
-static size_t          map_size = 0;
+    libs::RingBuffer<CAN_MessageDef, CAN_TX_QUEUE_SIZE, true> buffer;
+};
 
-static CAN_CallbackMap* get_map(const CAN_HandleTypeDef* hcan)
+CAN_CallbackMap maps[CAN_NUM];
+size_t          map_size = 0;
+
+CAN_CallbackMap* get_map(const CAN_HandleTypeDef* hcan)
 {
     for (size_t i = 0; i < map_size; i++)
         if (maps[i].hcan == hcan)
             return &maps[i];
 
-    return NULL;
+    return nullptr;
 }
+} // namespace
 
 /**
  * 发送一条 CAN 消息
@@ -73,40 +74,29 @@ uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
 {
     uint32_t mailbox = CAN_SEND_FAILED;
 
-    // 等待上一个发送完成
-    while (HAL_CAN_GetTxMailboxesFreeLevel(hcan) == 0)
-        ;
-    if (__get_IPSR() != 0)
+    // 直接锁定中断，这里锁定了中断就无法进行任务调度. 裸机与 RTOS 都适用
+    ISRGuard guard;
+    if (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0)
     {
-        // 在中断中直接调用
+        // 直接执行发送
         if (HAL_CAN_AddTxMessage(hcan, header, data, &mailbox) != HAL_OK)
         {
-            CAN_ERROR_HANDLER();
+            Error_Handler();
         }
     }
     else
-#ifdef USE_RTOS
-    { // 任务中调用需要加临界保护
-        if (osMutexAcquire(get_can_mutex(), CAN_SEND_TIMEOUT) != osOK)
-            // 超时
-            return CAN_SEND_FAILED;
-        if (HAL_CAN_AddTxMessage(hcan, header, data, &mailbox) != HAL_OK)
-        {
-            CAN_ERROR_HANDLER();
-        }
-        osMutexRelease(get_can_mutex());
-    }
-#else
     {
-        // 裸机状态下非中断调用需要保护
-        __disable_irq();
-        if (HAL_CAN_AddTxMessage(hcan, header, data, &mailbox) != HAL_OK)
-        {
-            CAN_ERROR_HANDLER();
-        }
-        __enable_irq();
+        // 已满，加入队列
+        get_map(hcan)->buffer.push(
+                [&](CAN_MessageDef& msg)
+                {
+                    assert(header->DLC <= 8);
+
+                    msg.header = *header;
+                    memcpy(msg.data, data, header->DLC);
+                    memset(msg.data + header->DLC, 0, 8 - header->DLC);
+                });
     }
-#endif
 
     return mailbox;
 }
@@ -120,12 +110,12 @@ void CAN_Start(CAN_HandleTypeDef* hcan, const uint32_t ActiveITs)
 {
     if (HAL_CAN_Start(hcan) != HAL_OK)
     {
-        CAN_ERROR_HANDLER();
+        Error_Handler();
     }
 
-    if (HAL_CAN_ActivateNotification(hcan, ActiveITs) != HAL_OK)
+    if (HAL_CAN_ActivateNotification(hcan, ActiveITs | CAN_IT_TX_MAILBOX_EMPTY) != HAL_OK)
     {
-        CAN_ERROR_HANDLER();
+        Error_Handler();
     }
 }
 
@@ -140,22 +130,21 @@ void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, const CAN_FifoReceiveCallback
 {
     CAN_CallbackMap* map = get_map(hcan);
 
-    if (map == NULL)
+    if (map == nullptr)
     {
         if (map_size >= CAN_NUM)
         {
-            CAN_ERROR_HANDLER();
+            Error_Handler();
             return;
         }
-        maps[map_size] =
-                (CAN_CallbackMap) { .hcan = hcan, .callbacks = { NULL }, .callback_count = 0 };
-        map = &maps[map_size];
+        maps[map_size] = (CAN_CallbackMap){ .hcan = hcan, .callbacks = {}, .callback_count = 0 };
+        map            = &maps[map_size];
         map_size++;
     }
     if (map->callback_count < CAN_MAX_CALLBACK_NUM)
         map->callbacks[map->callback_count++] = callback;
     else
-        CAN_ERROR_HANDLER();
+        Error_Handler();
 }
 /**
  * 取消注册 CAN Fifo 处理回调
@@ -183,11 +172,11 @@ void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
     uint8_t             data[8];
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
     {
-        CAN_ERROR_HANDLER();
+        Error_Handler();
         return;
     }
     const CAN_CallbackMap* map = get_map(hcan);
-    if (map != NULL)
+    if (map != nullptr)
         for (size_t i = 0; i < map->callback_count; i++)
             map->callbacks[i](hcan, &header, data);
 }
@@ -203,15 +192,37 @@ void CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
     uint8_t             data[8];
     if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK)
     {
-        CAN_ERROR_HANDLER();
+        Error_Handler();
         return;
     }
     const CAN_CallbackMap* map = get_map(hcan);
-    if (map != NULL)
+    if (map != nullptr)
         for (size_t i = 0; i < map->callback_count; i++)
             map->callbacks[i](hcan, &header, data);
 }
 
-#ifdef __cplusplus
+void CAN_TxMailboxCpltCallback(CAN_HandleTypeDef* hcan)
+{
+    auto map = get_map(hcan);
+    while (HAL_CAN_GetTxMailboxesFreeLevel(hcan) > 0 && !map->buffer.empty())
+    {
+        uint32_t mailbox = CAN_SEND_FAILED;
+
+        const auto msg = map->buffer.pop();
+        if (HAL_CAN_AddTxMessage(hcan, &msg->header, msg->data, &mailbox) != HAL_OK)
+        {
+            Error_Handler();
+        }
+    }
 }
-#endif
+
+void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
+{
+    assert(hcan != nullptr);
+
+    HAL_CAN_RegisterCallback(hcan, HAL_CAN_RX_FIFO0_MSG_PENDING_CB_ID, CAN_Fifo0ReceiveCallback);
+    HAL_CAN_RegisterCallback(hcan, HAL_CAN_RX_FIFO1_MSG_PENDING_CB_ID, CAN_Fifo1ReceiveCallback);
+    HAL_CAN_RegisterCallback(hcan, HAL_CAN_TX_MAILBOX0_COMPLETE_CB_ID, CAN_TxMailboxCpltCallback);
+    HAL_CAN_RegisterCallback(hcan, HAL_CAN_TX_MAILBOX1_COMPLETE_CB_ID, CAN_TxMailboxCpltCallback);
+    HAL_CAN_RegisterCallback(hcan, HAL_CAN_TX_MAILBOX2_COMPLETE_CB_ID, CAN_TxMailboxCpltCallback);
+}
