@@ -168,17 +168,20 @@ void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, const CAN_FifoReceiveCallback
  */
 void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
 {
-    CAN_RxHeaderTypeDef header;
-    uint8_t             data[8];
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
+    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0)
     {
-        Error_Handler();
-        return;
+        CAN_RxHeaderTypeDef header;
+        uint8_t             data[8];
+        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
+        {
+            Error_Handler();
+            return;
+        }
+        const CAN_CallbackMap* map = get_map(hcan);
+        if (map != nullptr)
+            for (size_t i = 0; i < map->callback_count; i++)
+                map->callbacks[i](hcan, &header, data);
     }
-    const CAN_CallbackMap* map = get_map(hcan);
-    if (map != nullptr)
-        for (size_t i = 0; i < map->callback_count; i++)
-            map->callbacks[i](hcan, &header, data);
 }
 /**
  * CAN Fifo1 接收处理函数
@@ -188,17 +191,20 @@ void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
  */
 void CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
 {
-    CAN_RxHeaderTypeDef header;
-    uint8_t             data[8];
-    if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK)
+    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0)
     {
-        Error_Handler();
-        return;
+        CAN_RxHeaderTypeDef header;
+        uint8_t             data[8];
+        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK)
+        {
+            Error_Handler();
+            return;
+        }
+        const CAN_CallbackMap* map = get_map(hcan);
+        if (map != nullptr)
+            for (size_t i = 0; i < map->callback_count; i++)
+                map->callbacks[i](hcan, &header, data);
     }
-    const CAN_CallbackMap* map = get_map(hcan);
-    if (map != nullptr)
-        for (size_t i = 0; i < map->callback_count; i++)
-            map->callbacks[i](hcan, &header, data);
 }
 
 void CAN_TxMailboxCpltCallback(CAN_HandleTypeDef* hcan)
