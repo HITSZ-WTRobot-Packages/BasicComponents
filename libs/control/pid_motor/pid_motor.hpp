@@ -2,7 +2,7 @@
  * @file    pid_motor.hpp
  * @author  syhanjin
  * @date    2026-01-28
- * @brief
+ * @brief   absolute pid with output
  */
 #ifndef PID_MOTOR_HPP
 #define PID_MOTOR_HPP
@@ -33,14 +33,14 @@ public:
 private:
     Config cfg_{};
 
-    float fdb_ = 0; //< 反馈量
+    float ref_ = 0.0f;
+    float fdb_ = 0.0f; //< 反馈量
 
-    float cur_error_   = 0; //< 当前误差
-    float prev_error1_ = 0; //< 上一次误差
-    float prev_error2_ = 0; //< 上上次误差
+    float error_      = 0.0f; //< current error
+    float prev_error_ = 0.0f; //< previous error
 
-    float output_ = 0; //< 输出量
-    float ref_    = 0; //< 目标值
+    float integral_ = 0.0f; //< integral state
+    float output_   = 0.0f; //< output
 };
 
 #endif // PID_MOTOR_HPP

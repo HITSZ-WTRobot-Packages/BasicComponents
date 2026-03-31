@@ -5,28 +5,52 @@
  */
 #include "pid_motor.hpp"
 
+#include <algorithm>
+
 float PIDMotor::calc(const float& ref, const float& fdb)
 {
-    cur_error_ = ref - fdb;
-    output_ += cfg_.Kp * (cur_error_ - prev_error1_) + cfg_.Ki * cur_error_ +
-               cfg_.Kd * (cur_error_ - 2 * prev_error1_ + prev_error2_);
-    if (output_ > cfg_.abs_output_max)
-        output_ = cfg_.abs_output_max;
-    if (output_ < -cfg_.abs_output_max)
-        output_ = -cfg_.abs_output_max;
+    ref_ = ref;
+    fdb_ = fdb;
 
-    prev_error2_ = prev_error1_;
-    prev_error1_ = cur_error_;
+    error_ = ref_ - fdb_;
 
+    /* derivative */
+    const float derivative = error_ - prev_error_;
+
+    /* P + D */
+    const float p = cfg_.Kp * error_;
+    const float d = cfg_.Kd * derivative;
+
+    /* PD clamp */
+    const float output_pd = std::clamp(p + d, -cfg_.abs_output_max, cfg_.abs_output_max);
+
+    /* remaining margin for integral */
+    float i_limit = cfg_.abs_output_max - std::fabsf(output_pd);
+    if (i_limit < 0.0f)
+        i_limit = 0.0f;
+
+    /* integrate (integral_ already includes Ki) */
+    integral_ += cfg_.Ki * error_;
+
+    /* integral clamp */
+    if (integral_ > i_limit)
+        integral_ = i_limit;
+    else if (integral_ < -i_limit)
+        integral_ = -i_limit;
+
+    /* final output */
+    output_ = output_pd + integral_;
+
+    prev_error_ = error_;
     return output_;
 }
 
 void PIDMotor::reset()
 {
-    ref_         = 0.0f;
-    fdb_         = 0.0f;
-    cur_error_   = 0.0f;
-    prev_error1_ = 0.0f;
-    prev_error2_ = 0.0f;
-    output_      = 0.0f;
+    ref_        = 0.0f;
+    fdb_        = 0.0f;
+    error_      = 0.0f;
+    prev_error_ = 0.0f;
+    integral_   = 0.0f;
+    output_     = 0.0f;
 }
