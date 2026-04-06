@@ -18,7 +18,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * Project repository: https://github.com/HITSZ-WTR2026/bsp_drivers
+ * Project repository: https://github.com/HITSZ-WTRobot-Packages/BasicComponents
  */
 #ifndef GPIO_DRIVER_H
 #define GPIO_DRIVER_H
