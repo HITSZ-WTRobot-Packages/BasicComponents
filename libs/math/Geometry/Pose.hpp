@@ -2,6 +2,9 @@
  * @file    Pose.hpp
  * @author  syhanjin
  * @date    2026-03-10
+ * @brief   三维刚体位姿表达。
+ *
+ * position 表示平移，rotation 使用四元数，便于组合和求逆。
  */
 #pragma once
 
@@ -25,6 +28,7 @@ template <typename T> struct Pose
     Vec3          pos; // translation
     Quaternion<T> rot; // rotation
 
+    // 默认位姿为原点 + 单位旋转。
     constexpr Pose() : pos(T(0), T(0), T(0)), rot() {}
 
     constexpr Pose(const Vec3& p, const Quaternion<T>& q) : pos(p), rot(q) {}
@@ -43,6 +47,7 @@ template <typename T> struct Pose
 
     inline Pose inverse() const
     {
+        // 逆位姿：先取逆旋转，再把平移反变换回来。
         Quaternion<T> r_inv = rot.conjugate();
         Vec3          p_inv = r_inv.rotate(-pos);
         return Pose(p_inv, r_inv);
@@ -57,6 +62,7 @@ template <typename T> struct Pose
      */
     inline Pose operator*(const Pose& other) const
     {
+        // 先旋转再平移，符合刚体变换复合规则。
         Pose r;
         r.rot = rot * other.rot;
         r.pos = rot.rotate(other.pos) + pos;

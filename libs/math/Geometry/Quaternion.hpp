@@ -2,6 +2,9 @@
  * @file    Quaternion.hpp
  * @author  syhanjin
  * @date    2026-03-09
+ * @brief   四元数姿态表达。
+ *
+ * 用于三维旋转的紧凑表示，避免欧拉角的万向节锁问题。
  */
 #pragma once
 #include "../LinearAlgebra/Vec.hpp"
@@ -18,9 +21,11 @@ template <typename T> struct Quaternion
 {
     T w, x, y, z;
 
+    // 默认单位四元数。
     Quaternion() : w(1), x(0), y(0), z(0) {}
     Quaternion(T w_, T x_, T y_, T z_) : w(w_), x(x_), y(y_), z(z_) { normalize(); }
 
+    // 保持单位长度，避免累计数值误差。
     inline void normalize()
     {
         T n = std::sqrt(w * w + x * x + y * y + z * z);
@@ -30,6 +35,7 @@ template <typename T> struct Quaternion
         z /= n;
     }
 
+    // 共轭等价于旋转逆方向。
     inline Quaternion conjugate() const { return Quaternion(w, -x, -y, -z); }
 
     inline Quaternion inverse() const
@@ -38,7 +44,7 @@ template <typename T> struct Quaternion
         return conjugate() * (1 / n2);
     }
 
-    // quaternion multiplication
+    // 四元数乘法，对应旋转复合。
     inline Quaternion operator*(const Quaternion& q) const
     {
         return Quaternion(w * q.w - x * q.x - y * q.y - z * q.z,
@@ -49,7 +55,7 @@ template <typename T> struct Quaternion
 
     inline Quaternion operator*(T s) const { return Quaternion(w * s, x * s, y * s, z * s); }
 
-    // rotate a Vec3
+    // 用四元数旋转三维向量。
     inline Vec<T, 3> rotateVector(const Vec<T, 3>& v) const
     {
         Vec<T, 3> qv(x, y, z);
@@ -59,13 +65,14 @@ template <typename T> struct Quaternion
 
     template <typename AngleUnit> explicit Quaternion(const EulerZYX<T, AngleUnit>& _e)
     {
+        // 输入可以是 deg 或 rad，先统一到弧度。
         EulerZYX<T> e;
         if constexpr (std::is_same_v<AngleUnit, unit::Deg>)
             e = _e.toRad();
         else
             e = _e;
 
-        // roll-pitch-yaw (ZYX)
+        // ZYX 顺序：yaw -> pitch -> roll。
         const T cr = cos(e.roll * T(0.5));
         const T sr = sin(e.roll * T(0.5));
         const T cp = cos(e.pitch * T(0.5));
