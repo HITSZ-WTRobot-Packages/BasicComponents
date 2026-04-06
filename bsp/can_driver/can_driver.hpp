@@ -1,5 +1,5 @@
 /**
- * @file    can.h
+ * @file    can_driver.hpp
  * @author  syhanjin
  * @date    2025-09-04
  * @brief   CAN wrapper based on HAL library
@@ -20,7 +20,7 @@
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  *
- * Project repository: https://github.com/HITSZ-WTRobot/bsp_drivers
+ * Project repository: https://github.com/HITSZ-WTRobot-Packages/BasicComponents
  */
 #pragma once
 
@@ -40,14 +40,17 @@
 
 #define CAN_SEND_FAILED (0xFFFF)
 
+// 一条 CAN 最多注册的回调数量
 #ifndef CAN_MAX_CALLBACK_NUM
 #    define CAN_MAX_CALLBACK_NUM (14)
 #endif
 
+// CAN 数量
 #ifndef CAN_NUM
 #    define CAN_NUM (2)
 #endif
 
+// CAN 发送 软件缓冲区大小
 #ifndef CAN_TX_QUEUE_SIZE
 #    define CAN_TX_QUEUE_SIZE (8)
 #endif
