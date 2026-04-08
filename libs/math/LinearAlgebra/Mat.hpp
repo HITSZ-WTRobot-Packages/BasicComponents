@@ -2,6 +2,10 @@
  * @file    Mat.hpp
  * @author  syhanjin
  * @date    2026-03-12
+ * @brief   固定维度矩阵模板。
+ *
+ * 这个实现更偏向控制、几何和状态估计中的小矩阵计算，不追求通用线代库那种完整性。
+ * 重点是让 2x2、3x3、4x4 这类常用矩阵的运算写法直观、容易跟代码审查。
  */
 #pragma once
 #include <cstddef>
@@ -204,7 +208,7 @@ template <typename T, size_t Rows, size_t Cols> struct Mat
         }
         else if constexpr (Rows == 4)
         {
-            // Laplace expansion, fully unrolled
+            // 4x4 行列式直接展开，避免递归和动态分配。
             const T a0 = data[0][0];
             const T a1 = data[0][1];
             const T a2 = data[0][2];
@@ -239,12 +243,14 @@ template <typename T, size_t Rows, size_t Cols> struct Mat
 
         if constexpr (Rows == 1)
         {
+            // 1x1 直接取倒数。
             Mat r{};
             r[0][0] = T(1) / data[0][0];
             return r;
         }
         else if constexpr (Rows == 2)
         {
+            // 2x2 使用闭式解。
             T   d = det();
             Mat r{};
             r[0][0] = data[1][1] / d;
@@ -255,6 +261,7 @@ template <typename T, size_t Rows, size_t Cols> struct Mat
         }
         else if constexpr (Rows == 3)
         {
+            // 3x3 使用伴随矩阵公式。
             T   d = det();
             Mat r{};
 
@@ -274,7 +281,7 @@ template <typename T, size_t Rows, size_t Cols> struct Mat
         }
         else if constexpr (Rows == 4)
         {
-            // adjugate / det
+            // 4x4 仍使用伴随矩阵，但用循环自动展开余子式。
             T   d = det();
             Mat r{};
 
@@ -311,12 +318,13 @@ template <typename T, size_t Rows, size_t Cols> struct Mat
     {
         static_assert(Rows == Cols, "inverse requires square matrix");
 
+        // 高斯-约旦消元，作为大于 4 维时的通用兜底实现。
         Mat a   = *this;
         Mat inv = Mat::identity();
 
         for (size_t i = 0; i < Rows; ++i)
         {
-            // pivot
+            // 主元归一化。
             T piv = a[i][i];
             assert(std::abs(piv) > T(1e-9));
 
@@ -347,6 +355,7 @@ template <typename T, size_t Rows, size_t Cols> struct Mat
 namespace mat
 {
 
+// 用向量构造对角矩阵。
 template <typename T, size_t Dim> static constexpr Mat<T, Dim, Dim> diag(const Vec<T, Dim>& v)
 {
     Mat m = Mat<T, Dim, Dim>::zero();

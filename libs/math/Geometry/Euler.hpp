@@ -2,6 +2,9 @@
  * @file    Euler.hpp
  * @author  syhanjin
  * @date    2026-03-09
+ * @brief   ZYX 欧拉角表达。
+ *
+ * 主要用于配置、日志和调试；内部状态建议优先使用四元数。
  */
 #pragma once
 #include <cmath>
@@ -56,10 +59,10 @@ template <typename T, typename AngleUnit = unit::Rad> struct EulerZYX
     T pitch; // rotation around Y
     T yaw;   // rotation around Z
 
-    // default constructor (zero rotation)
+    // 默认零旋转。
     constexpr EulerZYX() : roll(T(0)), pitch(T(0)), yaw(T(0)) {}
 
-    // direct value constructor (assumes unit == AngleUnit)
+    // 直接构造，值的单位由模板参数 AngleUnit 决定。
     constexpr EulerZYX(T r, T p, T y) : roll(r), pitch(p), yaw(y) {}
 
     /**
@@ -72,14 +75,14 @@ template <typename T, typename AngleUnit = unit::Rad> struct EulerZYX
      */
     explicit EulerZYX(const Quaternion<T>& q)
     {
-        // --- compute in rad ---
+        // 先按弧度计算，再按模板参数决定是否转成角度。
         const T sinp = T(2) * (q.w * q.y - q.z * q.x);
 
         T r_roll;
         T r_pitch;
         T r_yaw;
 
-        // pitch (Y)
+        // pitch (Y) 需要处理万向节锁附近的数值边界。
         if (std::abs(sinp) >= T(1))
         {
             r_pitch = std::copysign(T(M_PI) / T(2), sinp); // gimbal lock
@@ -95,7 +98,7 @@ template <typename T, typename AngleUnit = unit::Rad> struct EulerZYX
         // yaw (Z)
         r_yaw = std::atan2(T(2) * (q.w * q.z + q.x * q.y), T(1) - T(2) * (q.y * q.y + q.z * q.z));
 
-        // --- unit conversion at boundary ---
+        // 输出单位在边界统一转换。
         if constexpr (std::is_same_v<AngleUnit, unit::Deg>)
         {
             roll  = unit::rad2deg(r_roll);

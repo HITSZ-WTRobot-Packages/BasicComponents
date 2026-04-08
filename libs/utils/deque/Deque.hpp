@@ -2,6 +2,10 @@
  * @file    Deque.hpp
  * @author  syhanjin
  * @date    2026-03-13
+ * @brief   固定容量双端队列。
+ *
+ * 这个容器不做动态扩容，适合缓存固定长度数据、滑动窗口或者最近 N 次采样值。
+ * 它的实现目标是简单、可预测，而不是像标准库 deque 那样覆盖所有复杂用例。
  */
 #pragma once
 
@@ -51,6 +55,7 @@ public:
     {
         if (full())
         {
+            // 满时覆盖最旧元素，保持队列长度不变。
             data_[index(size_)] = v;
             head_               = (head_ + 1) % N; // overwrite oldest
         }
@@ -63,6 +68,7 @@ public:
 
     constexpr void push_front(const T& v) noexcept
     {
+        // 先把头指针往前挪，再写新值。
         head_ = (head_ + N - 1) % N;
 
         if (full())
@@ -94,6 +100,7 @@ public:
 private:
     [[nodiscard]] constexpr std::size_t index(std::size_t i) const noexcept
     {
+        // 物理索引 = 头部偏移 + 逻辑偏移。
         return (head_ + i) % N;
     }
     [[nodiscard]] constexpr std::size_t logical_index(int i) const noexcept
@@ -160,6 +167,11 @@ private:
     };
 
 public:
+    /**
+     * @brief 生成半开区间 [a, b) 的迭代范围。
+     *
+     * 这只是一个轻量遍历辅助，不会复制数据。
+     */
     constexpr auto range(int a, int b) noexcept { return DequeRange<Deque>(this, a, b); }
 
     constexpr auto range(int a, int b) const noexcept

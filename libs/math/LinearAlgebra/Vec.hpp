@@ -2,6 +2,10 @@
  * @file    Vec.hpp
  * @author  syhanjin
  * @date    2026-03-09
+ * @brief   轻量向量模板。
+ *
+ * 这个文件里的向量类型主要面向嵌入式和小规模数值计算场景：维度固定、接口简单、没有动态分配。
+ * 你可以把它当作运动学、姿态、控制量等小向量的基础表达类型。
  */
 #pragma once
 #include <cmath>
@@ -12,7 +16,7 @@
 namespace math
 {
 
-// 通用向量模板
+// 通用向量模板：适用于任意维度。
 template <typename T, size_t N> struct Vec
 {
     T data[N]{};
@@ -21,7 +25,7 @@ template <typename T, size_t N> struct Vec
     constexpr T&       operator[](size_t i) { return data[i]; }
     constexpr const T& operator[](size_t i) const { return data[i]; }
 
-    // zero vector
+    // 零向量。
     static constexpr Vec zero()
     {
         Vec v{};
@@ -30,7 +34,7 @@ template <typename T, size_t N> struct Vec
         return v;
     }
 
-    // addition
+    // 向量加法 / 原地加法。
     constexpr Vec operator+(const Vec& other) const
     {
         Vec res{};
@@ -45,7 +49,7 @@ template <typename T, size_t N> struct Vec
         return *this;
     }
 
-    // subtraction
+    // 向量减法 / 原地减法。
     constexpr Vec operator-(const Vec& other) const
     {
         Vec res{};
@@ -60,7 +64,7 @@ template <typename T, size_t N> struct Vec
         return *this;
     }
 
-    // scalar multiply
+    // 标量乘法 / 原地乘法。
     constexpr Vec operator*(T s) const
     {
         Vec res{};
@@ -75,7 +79,7 @@ template <typename T, size_t N> struct Vec
         return *this;
     }
 
-    // scalar divide
+    // 标量除法 / 原地除法。
     constexpr Vec operator/(T s) const
     {
         Vec res{};
@@ -90,7 +94,7 @@ template <typename T, size_t N> struct Vec
         return *this;
     }
 
-    // dot product
+    // 点积、范数和归一化。
     constexpr T dot(const Vec& other) const
     {
         T res = T(0);
@@ -108,7 +112,7 @@ template <typename T, size_t N> struct Vec
     }
 };
 
-// Vec3 specialization for cross product
+// Vec3 specialization for cross product。
 template <typename T> struct Vec<T, 3>
 {
     T x{}, y{}, z{};
@@ -119,7 +123,7 @@ template <typename T> struct Vec<T, 3>
     constexpr T&       operator[](size_t i) { return i == 0 ? x : (i == 1 ? y : z); }
     constexpr const T& operator[](size_t i) const { return i == 0 ? x : (i == 1 ? y : z); }
 
-    // arithmetic
+    // 三维加减乘除。
     constexpr Vec operator+(const Vec& o) const { return Vec(x + o.x, y + o.y, z + o.z); }
     constexpr Vec operator-(const Vec& o) const { return Vec(x - o.x, y - o.y, z - o.z); }
     constexpr Vec operator*(T s) const { return Vec(x * s, y * s, z * s); }
@@ -146,7 +150,7 @@ template <typename T> struct Vec<T, 3>
         return *this;
     }
 
-    // dot & cross
+    // 点积 / 叉积。
     constexpr T   dot(const Vec& o) const { return x * o.x + y * o.y + z * o.z; }
     constexpr Vec cross(const Vec& o) const
     {
@@ -159,7 +163,7 @@ template <typename T> struct Vec<T, 3>
     static constexpr Vec zero() { return Vec(0, 0, 0); }
 };
 
-// Vec2 specialization for planar kinematics
+// Vec2 specialization for planar kinematics。
 template <typename T> struct Vec<T, 2>
 {
     T x{}, y{};
@@ -167,11 +171,11 @@ template <typename T> struct Vec<T, 2>
     constexpr Vec() : x(0), y(0) {}
     constexpr Vec(T x_, T y_) : x(x_), y(y_) {}
 
-    // element access
+    // 元素访问。
     constexpr T&       operator[](size_t i) { return i == 0 ? x : y; }
     constexpr const T& operator[](size_t i) const { return i == 0 ? x : y; }
 
-    // arithmetic
+    // 二维加减乘除。
     constexpr Vec operator+(const Vec& o) const { return Vec(x + o.x, y + o.y); }
     constexpr Vec operator-(const Vec& o) const { return Vec(x - o.x, y - o.y); }
     constexpr Vec operator*(T s) const { return Vec(x * s, y * s); }
@@ -198,19 +202,18 @@ template <typename T> struct Vec<T, 2>
         return *this;
     }
 
-    // dot product
+    // 点积。
     constexpr T dot(const Vec& o) const { return x * o.x + y * o.y; }
 
-    // norm
+    // 欧式范数。
     constexpr T norm() const { return std::hypot(x, y); }
 
     constexpr Vec normalize() const { return (*this) / norm(); }
 
-    // perpendicular vector (90 deg CCW)
-    // used in omega × r
+    // 垂直向量（逆时针 90 度），常用于平面内 omega × r。
     constexpr Vec perp() const { return Vec(-y, x); }
 
-    // rotate by yaw (rad)
+    // 按 yaw 旋转，单位为弧度。
     constexpr Vec rotate(T yaw) const
     {
         T c = std::cos(yaw);

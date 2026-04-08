@@ -2,9 +2,16 @@
  * @file    crc.hpp
  * @author  syhanjin
  * @date    2026-03-01
- * @brief   CRC library
+ * @brief   通用 CRC 模板库。
  *
- * 常用 CRC
+ * 这个文件把常见 CRC
+ * 算法统一抽象成一个模板：多项式、初值、输入/输出是否反转、最终异或值都可以配置。
+ * 对使用者来说，最常见的用法就是直接 typedef 一个别名，然后在协议校验、数据帧完整性检查里调用
+ * calc()。
+ *
+ * 下面这些别名样例可以直接复制到自己的代码里：
+ *
+ * ```cpp
  * // CRC-8
  * using CRC8_ATM = crc::CRCX<8, 0x07, 0x00, false, false, 0x00>;
  *
@@ -33,6 +40,7 @@
  *                             false,
  *                             false,
  *                             0x0000000000000000ULL>;
+ * ```
  */
 #pragma once
 
@@ -90,6 +98,11 @@ template <unsigned Bits, auto Poly, auto Init, bool Rin, bool Rout, auto XorOut>
 
     static constexpr value_type mask = Bits == 64 ? value_type(-1) : (value_type(1) << Bits) - 1;
 
+    /**
+     * @brief 计算查找表中的单个表项。
+     *
+     * 这个函数在编译期生成 256 项查找表时被调用，因此运行时不会重复做这部分计算。
+     */
     static constexpr value_type table_entry(uint8_t index)
     {
         value_type c = Rin ? detail::bit_reverse<value_type>(index, 8) : value_type(index);
@@ -108,6 +121,11 @@ template <unsigned Bits, auto Poly, auto Init, bool Rin, bool Rout, auto XorOut>
         return Rout ? detail::bit_reverse<value_type>(c, Bits) : c;
     }
 
+    /**
+     * @brief 生成 256 项查找表。
+     *
+     * 运行时计算 CRC 时只需要做表查找，不必每个 bit 都手工移位。
+     */
     static constexpr std::array<value_type, 256> generate_table()
     {
         std::array<value_type, 256> t{};
@@ -121,6 +139,11 @@ template <unsigned Bits, auto Poly, auto Init, bool Rin, bool Rout, auto XorOut>
 public:
     static value_type calc(const uint8_t* data, size_t len)
     {
+        /**
+         * @brief 对任意长度的原始缓冲区计算 CRC。
+         *
+         * 这是最常用的接口，适合接收帧、结构体序列化后校验等场景。
+         */
         value_type crc = Init;
 
         while (len--)
@@ -144,6 +167,11 @@ public:
 
     template <std::size_t N> static constexpr value_type calc(const std::array<uint8_t, N>& data)
     {
+        /**
+         * @brief 对固定长度 std::array 计算 CRC。
+         *
+         * 当数据长度在编译期已知时，这个接口也可以参与 constexpr 求值。
+         */
         value_type crc = Init;
 
         for (std::size_t i = 0; i < N; ++i)

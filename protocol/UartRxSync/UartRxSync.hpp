@@ -2,6 +2,9 @@
  * @file    UartRxSync.hpp
  * @author  syhanjin
  * @date    2026-02-01
+ * @brief   带帧头同步的 UART 接收器。
+ *
+ * 通过“找帧头 + DMA 收剩余帧”来降低丢包风险，适合固定帧格式传感器。
  */
 #ifndef UARTRXSYNC_HPP
 #define UARTRXSYNC_HPP
@@ -21,8 +24,9 @@ namespace protocol
 {
 
 /**
- * @deprecated 无须使用此宏函数，直接调用 RegisterCallback 即可
- * @param __obj__ uart rx sync pointer
+ * @deprecated 旧式宏包装，建议直接使用类实例的回调注册方式。
+ *
+ * 这个宏保留主要是为了兼容旧代码，新的代码请直接调用 RegisterCallback 对应的能力。
  */
 #define UartRxSync_DefineCallback(__obj__)
 
@@ -35,10 +39,10 @@ namespace protocol
                               [](UART_HandleTypeDef* huart) { (__obj__)->errorHandler(); })
 
 /**
- * 带帧头同步功能的串口接收器，基于中断和 DMA
- * @tparam HeaderLen 帧头长度
- * @tparam FrameLen 帧长度
- * @tparam DecodeWithHeader decode 时是否带上帧头
+ * @brief 带帧头同步功能的串口接收器，基于中断和 DMA。
+ *
+ * 典型使用场景是固定帧格式传感器：先用中断逐字节找帧头，再交给 DMA 接收整帧剩余部分。
+ * 这样既能保持同步，也能减少每个字节都进中断带来的开销。
  */
 template <size_t HeaderLen, size_t FrameLen, bool DecodeWithHeader = false> class UartRxSync
 {
@@ -50,15 +54,19 @@ public:
     virtual ~UartRxSync() = default;
     enum class SyncState
     {
+        // 未启动或已停止。
         Stopped,
+        // 使用 IT 模式逐字节搜索帧头。
         WaitHead,
+        // 已匹配帧头，正在用 DMA 收剩余帧。
         Receiving,
+        // 正常工作态，DMA 持续接收下一帧。
         DMAActive,
     };
 
     bool startReceive()
     {
-        // check configurations
+        // 检查 UART 和 DMA 配置是否符合 DMA 循环接收要求。
         if (huart_ == nullptr || huart_->hdmarx == nullptr ||
             huart_->hdmarx->Init.Mode != DMA_CIRCULAR)
             return false;
@@ -75,7 +83,7 @@ public:
 #endif
             if (!check_header())
             {
-                // 帧头错误，重新匹配
+                // 帧头错位，说明流中断或解析失败，重新回到找帧头状态。
 #ifdef DEBUG
                 ++hdr_error_cnt;
 #endif
@@ -89,7 +97,7 @@ public:
         }
         else if (state_ == SyncState::WaitHead)
         {
-            // 匹配到帧头最后一位就往前进行一次 check
+            // 逐字节滑动窗口匹配帧头。
             size_t idx_next = hdr_idx_ + 1;
             if (idx_next == HeaderLen)
                 idx_next = 0;
@@ -100,13 +108,13 @@ public:
 #ifdef DEBUG
                     ++hdr_match_cnt;
 #endif
-                    // 使用 DMA 接收完剩下的内容
+                    // 帧头匹配成功后，用 DMA 接收剩余帧数据。
                     HAL_UART_Receive_DMA(huart_, rx_buffer_ + HeaderLen, FrameLen - HeaderLen);
                     state_ = SyncState::Receiving;
                     return;
                 }
             }
-            // 继续接收下一位
+            // 继续接收下一字节作为滑动窗口的新尾部。
             HAL_UART_Receive_IT(huart_, rx_buffer_ + idx_next, 1);
             hdr_idx_ = idx_next;
         }
@@ -116,15 +124,7 @@ public:
             ++data_received_cnt;
 #endif
             HAL_UART_AbortReceive(huart_);
-            /**
-             * 由于 decode 抛弃了 head，所以这里可以先开始接收
-             * 只要保证 decode 时间 < 1 / bitrate * 10 * header_len 即可
-             * 对于 115200 bitrate，1 byte 需要约 86us
-             * 对于 2M bitrate, 1 byte 需要约 5us
-             * 24 字节的查表法 CRC8 需要约 1.4us，逐位计算需要约 2.3us
-             *
-             * 其实建议先解算再继续接收( 但是我是犟种
-             */
+            // 这里先重新开启下一帧接收，再在后台解码当前帧，以缩短中断占用时间。
             HAL_UART_Receive_DMA(huart_, rx_buffer_, FrameLen);
             state_ = SyncState::DMAActive;
             _decode();
@@ -135,20 +135,20 @@ public:
     {
         if (huart_->ErrorCode == HAL_UART_ERROR_NONE)
         {
-            // not a real uart error
+            // 不是实际 UART 错误，直接返回。
             return;
         }
 #ifdef DEBUG
         ++rx_error_event_cnt;
 #endif
 
-        // clear error flags
+        // 清除错误标志，避免错误状态反复触发。
         __HAL_UART_CLEAR_PEFLAG(huart_);
         __HAL_UART_CLEAR_FEFLAG(huart_);
         __HAL_UART_CLEAR_NEFLAG(huart_);
         __HAL_UART_CLEAR_OREFLAG(huart_);
 
-        // restart receive
+        // 重启接收并回到找帧头状态。
         HAL_UART_AbortReceive(huart_);
         if (state_ != SyncState::WaitHead)
         {
@@ -160,6 +160,7 @@ public:
 
     [[nodiscard]] bool isConnected() const
     {
+        // 只有状态正常且 watchdog 还在续命时，才认为链路在线。
         return state_ == SyncState::DMAActive && watchdog_.isFed();
     }
 
@@ -186,6 +187,7 @@ private:
     {
         auto& hdr = header();
 
+        // 先检查尾部，再回绕到 buffer 前部，完成滑动窗口比对。
         const size_t first_len = HeaderLen - hdr_idx_ - 1; // tail + 1 到 buffer 末尾
         for (size_t i = 0; i < first_len; ++i)
             if (rx_buffer_[hdr_idx_ + i + 1] != hdr[i])
@@ -204,17 +206,19 @@ private:
 
         if constexpr (DecodeWithHeader)
         {
-            // 整理环形缓冲区里的 header
+            // 如果 decode 需要头部，就把 header 覆盖到缓冲区开头。
             memcpy(rx_buffer_, header().data(), HeaderLen);
             data = &rx_buffer_[0];
         }
         else
         {
+            // 默认只把 payload 传给 decode。
             data = &rx_buffer_[HeaderLen];
         }
 
         if (decode(data))
         {
+            // 解码成功后刷新 watchdog。
             watchdog_.feed(timeout());
 #ifdef DEBUG
             ++decode_success_cnt;
