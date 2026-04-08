@@ -121,6 +121,17 @@ public:
     }
 
     /**
+     * @brief 清空缓冲区中的所有元素。
+     *
+     * 这个操作只会复位读写指针，不会改写底层存储。
+     */
+    void clear() noexcept
+    {
+        head_ = 0;
+        tail_ = 0;
+    }
+
+    /**
      * @brief 查询队列状态。
      */
     [[nodiscard]] bool empty() const noexcept { return head_ == tail_; }
