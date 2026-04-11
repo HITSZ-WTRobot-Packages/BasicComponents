@@ -10,15 +10,24 @@
 #define UARTRXSYNC_HPP
 
 #include "main.h"
+
+#ifndef HAL_UART_MODULE_ENABLED
+#    error "UartRxSync requires HAL UART enabled. Please enable UART in CubeMX."
+#endif
+
+#ifndef HAL_DMA_MODULE_ENABLED
+#    error "UartRxSync requires HAL DMA enabled. Please enable UART Rx DMA in CubeMX."
+#endif
+
+#if !(USE_HAL_UART_REGISTER_CALLBACKS)
+#    error "UartRxSync requires HAL UART RegisterCallback enabled. Please enable it in CubeMX: Project Manager -> Advanced Settings -> Register Callbacks -> UART"
+#endif
+
 #include "watchdog.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstring>
-
-#ifndef HAL_UART_MODULE_ENABLED
-#    error "HAL UART module is not enabled. Enable HAL_UART_MODULE_ENABLED in stm32xxxx_hal_conf.h"
-#endif
 
 namespace protocol
 {

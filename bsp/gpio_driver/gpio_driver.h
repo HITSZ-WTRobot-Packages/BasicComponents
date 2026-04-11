@@ -27,6 +27,10 @@
 #define GPIO_DRIVER_H
 #include "main.h"
 
+#ifndef HAL_GPIO_MODULE_ENABLED
+#    error "GPIO driver requires HAL GPIO enabled. Please enable GPIO in CubeMX."
+#endif
+
 #ifdef __cplusplus
 extern "C"
 {

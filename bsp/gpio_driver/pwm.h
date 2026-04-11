@@ -28,6 +28,10 @@
 
 #include "main.h"
 
+#ifndef HAL_TIM_MODULE_ENABLED
+#    error "PWM driver requires HAL TIM enabled. Please enable a timer in CubeMX."
+#endif
+
 #ifdef __cplusplus
 extern "C"
 {

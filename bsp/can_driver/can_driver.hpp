@@ -34,7 +34,7 @@
 #    error "this can_driver do not support FDCAN"
 #endif
 
-#if !defined(USE_HAL_CAN_REGISTER_CALLBACKS)
+#if !(USE_HAL_CAN_REGISTER_CALLBACKS)
 #    error "CAN driver requires HAL CAN RegisterCallback enabled. Please enable it in CubeMX: Project Manager -> Advanced Settings -> Register Callbacks -> CAN"
 #endif
 
