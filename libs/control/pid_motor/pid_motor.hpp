@@ -36,15 +36,19 @@ public:
     /**
      * @brief 更新控制参数。
      */
-    void  setConfig(const Config& cfg) { cfg_ = cfg; }
+    void setConfig(const Config& cfg) { cfg_ = cfg; }
+    /**
+     * @brief 获取控制参数。
+     */
+    [[nodiscard]] const Config& getConfig() const { return cfg_; }
     /**
      * @brief 直接修改输出上限。
      */
-    void  setOutputMax(const float output_max) { cfg_.abs_output_max = std::fabsf(output_max); }
+    void setOutputMax(const float output_max) { cfg_.abs_output_max = std::fabsf(output_max); }
     /**
      * @brief 清空内部状态。
      */
-    void  reset();
+    void reset();
 
     [[nodiscard]] float getRef() const { return ref_; }
     [[nodiscard]] float getOutput() const { return output_; }
