@@ -1,0 +1,296 @@
+/**
+ * @file    I2CBusDMA.cpp
+ * @brief   I2C DMA 总线封装实现
+ */
+#include "I2CBusDMA.hpp"
+
+I2CBusDMA* I2CBusDMA::instances_[I2CBusDMA::MaxInstances] = { nullptr };
+
+I2CBusDMA::I2CBusDMA(I2C_HandleTypeDef* hi2c) : hi2c_(hi2c)
+{
+    // 构造时把当前 bus 实例登记到静态表中，后续 HAL 全局回调才能反查到对象。
+    if (hi2c_ != nullptr && registerInstance(this))
+    {
+        last_error_ = Error::None;
+    }
+}
+
+bool I2CBusDMA::isBusy() const
+{
+    if (hi2c_ == nullptr)
+        return false;
+
+    return transfer_in_flight_ || (HAL_I2C_GetState(hi2c_) != HAL_I2C_STATE_READY);
+}
+
+bool I2CBusDMA::memRead(const uint8_t  device_addr_7bit,
+                        const uint8_t  reg,
+                        uint8_t*       data,
+                        const uint16_t len,
+                        const uint32_t timeout_ms)
+{
+    // 发起 DMA 之前先确认总线空闲，并记录当前等待完成的任务。
+    if (!prepareTransfer())
+        return false;
+
+    const HAL_StatusTypeDef status =
+        HAL_I2C_Mem_Read_DMA(hi2c_, static_cast<uint16_t>(device_addr_7bit << 1U), reg, I2C_MEMADD_SIZE_8BIT, data, len);
+
+    if (status != HAL_OK)
+    {
+        // DMA 启动失败时，这次传输根本没有进入 in-flight 状态，直接清理现场即可。
+        transfer_in_flight_ = false;
+        waiting_task_       = nullptr;
+        last_error_         = Error::StartFailed;
+        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        return false;
+    }
+
+    return waitForTransfer(timeout_ms);
+}
+
+bool I2CBusDMA::memWrite(const uint8_t        device_addr_7bit,
+                         const uint8_t        device_reg,
+                         const uint8_t* const data,
+                         const uint16_t       len,
+                         const uint32_t       timeout_ms)
+{
+    // mem write 和 mem read 使用同一套等待机制，区别只在 HAL 启动接口。
+    if (!prepareTransfer())
+        return false;
+
+    const HAL_StatusTypeDef status = HAL_I2C_Mem_Write_DMA(hi2c_,
+                                                           static_cast<uint16_t>(device_addr_7bit << 1U),
+                                                           device_reg,
+                                                           I2C_MEMADD_SIZE_8BIT,
+                                                           const_cast<uint8_t*>(data),
+                                                           len);
+
+    if (status != HAL_OK)
+    {
+        transfer_in_flight_ = false;
+        waiting_task_       = nullptr;
+        last_error_         = Error::StartFailed;
+        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        return false;
+    }
+
+    return waitForTransfer(timeout_ms);
+}
+
+bool I2CBusDMA::read(const uint8_t  device_addr_7bit,
+                     uint8_t*       data,
+                     const uint16_t len,
+                     const uint32_t timeout_ms)
+{
+    if (!prepareTransfer())
+        return false;
+
+    const HAL_StatusTypeDef status =
+        HAL_I2C_Master_Receive_DMA(hi2c_, static_cast<uint16_t>(device_addr_7bit << 1U), data, len);
+
+    if (status != HAL_OK)
+    {
+        transfer_in_flight_ = false;
+        waiting_task_       = nullptr;
+        last_error_         = Error::StartFailed;
+        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        return false;
+    }
+
+    return waitForTransfer(timeout_ms);
+}
+
+bool I2CBusDMA::write(const uint8_t        device_addr_7bit,
+                      const uint8_t* const data,
+                      const uint16_t       len,
+                      const uint32_t       timeout_ms)
+{
+    if (!prepareTransfer())
+        return false;
+
+    const HAL_StatusTypeDef status =
+        HAL_I2C_Master_Transmit_DMA(hi2c_, static_cast<uint16_t>(device_addr_7bit << 1U), const_cast<uint8_t*>(data), len);
+
+    if (status != HAL_OK)
+    {
+        transfer_in_flight_ = false;
+        waiting_task_       = nullptr;
+        last_error_         = Error::StartFailed;
+        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        return false;
+    }
+
+    return waitForTransfer(timeout_ms);
+}
+
+bool I2CBusDMA::recover()
+{
+    if (hi2c_ == nullptr)
+    {
+        last_error_ = Error::InvalidHandle;
+        return false;
+    }
+
+    // 恢复前先把软件态清空，避免 manager 误以为还有旧事务未完成。
+    transfer_in_flight_ = false;
+    transfer_done_      = false;
+    waiting_task_       = nullptr;
+
+    // 这里是最轻量的恢复策略：重新 DeInit / Init 外设。
+    // 如果现场经常出现 SDA 被从机拉低，正式版本建议再补 GPIO 脉冲恢复。
+    if (HAL_I2C_DeInit(hi2c_) != HAL_OK)
+    {
+        last_error_     = Error::RecoveryFailed;
+        last_hal_error_ = HAL_I2C_GetError(hi2c_);
+        return false;
+    }
+
+    if (HAL_I2C_Init(hi2c_) != HAL_OK)
+    {
+        last_error_     = Error::RecoveryFailed;
+        last_hal_error_ = HAL_I2C_GetError(hi2c_);
+        return false;
+    }
+
+    last_error_     = Error::None;
+    last_hal_error_ = HAL_I2C_ERROR_NONE;
+    return true;
+}
+
+I2CBusDMA* I2CBusDMA::fromHandle(I2C_HandleTypeDef* hi2c)
+{
+    for (auto* instance : instances_)
+    {
+        if (instance != nullptr && instance->hi2c_ == hi2c)
+            return instance;
+    }
+    return nullptr;
+}
+
+void I2CBusDMA::onTxCompleteFromISR()
+{
+    completeFromISR(true, HAL_I2C_ERROR_NONE);
+}
+
+void I2CBusDMA::onRxCompleteFromISR()
+{
+    completeFromISR(true, HAL_I2C_ERROR_NONE);
+}
+
+void I2CBusDMA::onErrorFromISR()
+{
+    completeFromISR(false, HAL_I2C_GetError(hi2c_));
+}
+
+bool I2CBusDMA::prepareTransfer()
+{
+    if (hi2c_ == nullptr)
+    {
+        last_error_ = Error::InvalidHandle;
+        return false;
+    }
+
+    if (transfer_in_flight_ || (HAL_I2C_GetState(hi2c_) != HAL_I2C_STATE_READY))
+    {
+        // 这套封装默认一条总线同一时刻只允许一个事务在飞。
+        last_error_ = Error::Busy;
+        return false;
+    }
+
+    // 记录当前调用任务，DMA 完成后通过任务通知把它唤醒。
+    waiting_task_       = xTaskGetCurrentTaskHandle();
+    transfer_in_flight_ = true;
+    transfer_done_      = false;
+    last_error_         = Error::None;
+    last_hal_error_     = HAL_I2C_ERROR_NONE;
+
+    // 清掉可能残留的通知，避免把旧完成事件误当成本次 DMA 完成。
+    (void) ulTaskNotifyTake(pdTRUE, 0);
+    return true;
+}
+
+bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
+{
+    const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms == 0U ? 1U : timeout_ms);
+    const uint32_t   notified      = ulTaskNotifyTake(pdTRUE, timeout_ticks);
+
+    if (notified == 0U)
+    {
+        // 超时通常意味着 DMA 回调没回来，或者总线卡死，交给 recoverFromFailure 做恢复。
+        return recoverFromFailure(Error::Timeout);
+    }
+
+    waiting_task_ = nullptr;
+    transfer_done_ = false;
+    return last_error_ == Error::None;
+}
+
+void I2CBusDMA::completeFromISR(const bool success, const uint32_t hal_error)
+{
+    // 这里运行在 HAL 的中断回调上下文，只做状态落盘和唤醒等待任务。
+    transfer_in_flight_ = false;
+    transfer_done_      = true;
+    last_hal_error_     = hal_error;
+    last_error_         = success ? Error::None : Error::HalError;
+
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    if (waiting_task_ != nullptr)
+    {
+        vTaskNotifyGiveFromISR(waiting_task_, &higher_priority_task_woken);
+    }
+    portYIELD_FROM_ISR(higher_priority_task_woken);
+}
+
+bool I2CBusDMA::recoverFromFailure(const Error error)
+{
+    // 保留这次失败的上层错误语义，同时尝试把硬件总线拉回可用状态。
+    const bool recovered = recover();
+    if (recovered)
+        last_error_ = error;
+    return false;
+}
+
+bool I2CBusDMA::registerInstance(I2CBusDMA* const instance)
+{
+    for (auto& slot : instances_)
+    {
+        if (slot == nullptr)
+        {
+            slot = instance;
+            return true;
+        }
+    }
+    return false;
+}
+
+extern "C" void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef* hi2c)
+{
+    // HAL 只给 C 风格全局回调，需要先反查 bus 对象再转发。
+    if (auto* bus = I2CBusDMA::fromHandle(hi2c); bus != nullptr)
+        bus->onTxCompleteFromISR();
+}
+
+extern "C" void HAL_I2C_MasterRxCpltCallback(I2C_HandleTypeDef* hi2c)
+{
+    if (auto* bus = I2CBusDMA::fromHandle(hi2c); bus != nullptr)
+        bus->onRxCompleteFromISR();
+}
+
+extern "C" void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef* hi2c)
+{
+    if (auto* bus = I2CBusDMA::fromHandle(hi2c); bus != nullptr)
+        bus->onTxCompleteFromISR();
+}
+
+extern "C" void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef* hi2c)
+{
+    if (auto* bus = I2CBusDMA::fromHandle(hi2c); bus != nullptr)
+        bus->onRxCompleteFromISR();
+}
+
+extern "C" void HAL_I2C_ErrorCallback(I2C_HandleTypeDef* hi2c)
+{
+    if (auto* bus = I2CBusDMA::fromHandle(hi2c); bus != nullptr)
+        bus->onErrorFromISR();
+}

@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_subdirectory(bsp/can_driver)
 add_subdirectory(bsp/gpio_driver)
+add_subdirectory(bsp/i2c_driver)
 
 add_subdirectory(libs/traits)
 add_subdirectory(libs/control)
@@ -15,6 +16,7 @@ add_subdirectory(libs/math)
 add_subdirectory(libs/concurrency)
 
 add_subdirectory(services/watchdog)
+add_subdirectory(services/i2c_update_manager)
 
 add_subdirectory(protocol/UartRxSync)
 
