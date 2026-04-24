@@ -142,22 +142,40 @@ public:
 
     void errorHandler()
     {
-        if (huart_->ErrorCode == HAL_UART_ERROR_NONE)
+        constexpr uint32_t uart_rx_error_mask = HAL_UART_ERROR_PE | HAL_UART_ERROR_FE |
+                                                HAL_UART_ERROR_NE | HAL_UART_ERROR_ORE;
+
+        const uint32_t error_code = huart_->ErrorCode;
+        const bool     has_uart_rx_error =
+                (error_code & uart_rx_error_mask) != 0U;
+        const bool has_rx_dma_error = (error_code & HAL_UART_ERROR_DMA) != 0U &&
+                                      huart_->hdmarx != nullptr &&
+                                      huart_->hdmarx->ErrorCode != HAL_DMA_ERROR_NONE;
+
+        if (!has_uart_rx_error && !has_rx_dma_error)
         {
-            // 不是实际 UART 错误，直接返回。
+            // 非 RX 侧错误（例如 TX DMA 异常）由上层自行处理。
             return;
         }
 #ifdef DEBUG
         ++rx_error_event_cnt;
 #endif
 
-        // 清除错误标志，避免错误状态反复触发。
-        __HAL_UART_CLEAR_PEFLAG(huart_);
-        __HAL_UART_CLEAR_FEFLAG(huart_);
-        __HAL_UART_CLEAR_NEFLAG(huart_);
-        __HAL_UART_CLEAR_OREFLAG(huart_);
+        // 清除 RX 侧错误标志，避免错误状态反复触发。
+        if ((error_code & HAL_UART_ERROR_PE) != 0U)
+            __HAL_UART_CLEAR_PEFLAG(huart_);
+        if ((error_code & HAL_UART_ERROR_FE) != 0U)
+            __HAL_UART_CLEAR_FEFLAG(huart_);
+        if ((error_code & HAL_UART_ERROR_NE) != 0U)
+            __HAL_UART_CLEAR_NEFLAG(huart_);
+        if ((error_code & HAL_UART_ERROR_ORE) != 0U)
+            __HAL_UART_CLEAR_OREFLAG(huart_);
 
-        // 重启接收并回到找帧头状态。
+        // RX DMA 进入错误态后，将其本地错误码清零，再重启接收。
+        if (has_rx_dma_error)
+            huart_->hdmarx->ErrorCode = HAL_DMA_ERROR_NONE;
+
+        // 仅重启接收并回到找帧头状态，不干预 TX 状态。
         HAL_UART_AbortReceive(huart_);
         if (state_ != SyncState::WaitHead)
         {
