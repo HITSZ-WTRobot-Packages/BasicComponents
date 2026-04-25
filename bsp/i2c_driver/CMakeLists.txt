@@ -7,9 +7,8 @@ target_include_directories(BspI2CDriver
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
-target_link_libraries(BspI2CDriver
-    PUBLIC
-    stm32cubemx
-)
+# link dependencies if any
+target_link_libraries(BspI2CDriver PUBLIC stm32cubemx)
 
+# alias for external use
 add_library(bsp::I2CDriver ALIAS BspI2CDriver)
