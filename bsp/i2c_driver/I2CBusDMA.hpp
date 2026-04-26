@@ -87,8 +87,11 @@ private:
 
     I2C_HandleTypeDef* hi2c_{ nullptr };
     TaskHandle_t       waiting_task_{ nullptr };
-    volatile bool      transfer_in_flight_{ false };
-    volatile bool      transfer_done_{ false };
+    volatile bool      transmitting_{ false };
+    volatile bool      completed_{ false };
+    volatile uint32_t  next_transfer_id_{ 1U };
+    volatile uint32_t  current_transfer_id_{ 0U };
+    volatile uint32_t  completed_transfer_id_{ 0U };
     volatile Error     last_error_{ Error::InvalidHandle };
     volatile uint32_t  last_hal_error_{ HAL_I2C_ERROR_NONE };
 

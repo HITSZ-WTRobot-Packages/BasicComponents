@@ -20,7 +20,7 @@ bool I2CBusDMA::isBusy() const
     if (hi2c_ == nullptr)
         return false;
 
-    return transfer_in_flight_ || (HAL_I2C_GetState(hi2c_) != HAL_I2C_STATE_READY);
+    return transmitting_ || (HAL_I2C_GetState(hi2c_) != HAL_I2C_STATE_READY);
 }
 
 bool I2CBusDMA::memRead(const uint8_t  device_addr_7bit,
@@ -39,10 +39,13 @@ bool I2CBusDMA::memRead(const uint8_t  device_addr_7bit,
     if (status != HAL_OK)
     {
         // DMA 启动失败时，这次传输根本没有进入 in-flight 状态，直接清理现场即可。
-        transfer_in_flight_ = false;
-        waiting_task_       = nullptr;
-        last_error_         = Error::StartFailed;
-        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        transmitting_          = false;
+        completed_             = false;
+        waiting_task_          = nullptr;
+        current_transfer_id_   = 0U;
+        completed_transfer_id_ = 0U;
+        last_error_            = Error::StartFailed;
+        last_hal_error_        = HAL_I2C_GetError(hi2c_);
         return false;
     }
 
@@ -68,10 +71,13 @@ bool I2CBusDMA::memWrite(const uint8_t        device_addr_7bit,
 
     if (status != HAL_OK)
     {
-        transfer_in_flight_ = false;
-        waiting_task_       = nullptr;
-        last_error_         = Error::StartFailed;
-        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        transmitting_          = false;
+        completed_             = false;
+        waiting_task_          = nullptr;
+        current_transfer_id_   = 0U;
+        completed_transfer_id_ = 0U;
+        last_error_            = Error::StartFailed;
+        last_hal_error_        = HAL_I2C_GetError(hi2c_);
         return false;
     }
 
@@ -91,10 +97,13 @@ bool I2CBusDMA::read(const uint8_t  device_addr_7bit,
 
     if (status != HAL_OK)
     {
-        transfer_in_flight_ = false;
-        waiting_task_       = nullptr;
-        last_error_         = Error::StartFailed;
-        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        transmitting_          = false;
+        completed_             = false;
+        waiting_task_          = nullptr;
+        current_transfer_id_   = 0U;
+        completed_transfer_id_ = 0U;
+        last_error_            = Error::StartFailed;
+        last_hal_error_        = HAL_I2C_GetError(hi2c_);
         return false;
     }
 
@@ -114,10 +123,13 @@ bool I2CBusDMA::write(const uint8_t        device_addr_7bit,
 
     if (status != HAL_OK)
     {
-        transfer_in_flight_ = false;
-        waiting_task_       = nullptr;
-        last_error_         = Error::StartFailed;
-        last_hal_error_     = HAL_I2C_GetError(hi2c_);
+        transmitting_          = false;
+        completed_             = false;
+        waiting_task_          = nullptr;
+        current_transfer_id_   = 0U;
+        completed_transfer_id_ = 0U;
+        last_error_            = Error::StartFailed;
+        last_hal_error_        = HAL_I2C_GetError(hi2c_);
         return false;
     }
 
@@ -133,9 +145,11 @@ bool I2CBusDMA::recover()
     }
 
     // 恢复前先把软件态清空，避免 manager 误以为还有旧事务未完成。
-    transfer_in_flight_ = false;
-    transfer_done_      = false;
-    waiting_task_       = nullptr;
+    transmitting_          = false;
+    completed_             = false;
+    waiting_task_          = nullptr;
+    current_transfer_id_   = 0U;
+    completed_transfer_id_ = 0U;
 
     // 这里是最轻量的恢复策略：重新 DeInit / Init 外设。
     // 如果现场经常出现 SDA 被从机拉低，正式版本建议再补 GPIO 脉冲恢复。
@@ -191,7 +205,7 @@ bool I2CBusDMA::prepareTransfer()
         return false;
     }
 
-    if (transfer_in_flight_ || (HAL_I2C_GetState(hi2c_) != HAL_I2C_STATE_READY))
+    if (transmitting_ || (HAL_I2C_GetState(hi2c_) != HAL_I2C_STATE_READY))
     {
         // 这套封装默认一条总线同一时刻只允许一个事务在飞。
         last_error_ = Error::Busy;
@@ -199,11 +213,13 @@ bool I2CBusDMA::prepareTransfer()
     }
 
     // 记录当前调用任务，DMA 完成后通过任务通知把它唤醒。
-    waiting_task_       = xTaskGetCurrentTaskHandle();
-    transfer_in_flight_ = true;
-    transfer_done_      = false;
-    last_error_         = Error::None;
-    last_hal_error_     = HAL_I2C_ERROR_NONE;
+    waiting_task_          = xTaskGetCurrentTaskHandle();
+    transmitting_          = true;
+    completed_             = false;
+    current_transfer_id_   = next_transfer_id_++;
+    completed_transfer_id_ = 0U;
+    last_error_            = Error::None;
+    last_hal_error_        = HAL_I2C_ERROR_NONE;
 
     // 清掉可能残留的通知，避免把旧完成事件误当成本次 DMA 完成。
     (void) ulTaskNotifyTake(pdTRUE, 0);
@@ -213,26 +229,45 @@ bool I2CBusDMA::prepareTransfer()
 bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
 {
     const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms == 0U ? 1U : timeout_ms);
-    const uint32_t   notified      = ulTaskNotifyTake(pdTRUE, timeout_ticks);
+    const TickType_t start_ticks   = xTaskGetTickCount();
+    const uint32_t   transfer_id   = current_transfer_id_;
 
-    if (notified == 0U)
+    while (true)
     {
-        // 超时通常意味着 DMA 回调没回来，或者总线卡死，交给 recoverFromFailure 做恢复。
-        return recoverFromFailure(Error::Timeout);
-    }
+        const TickType_t elapsed_ticks = xTaskGetTickCount() - start_ticks;
+        if (elapsed_ticks >= timeout_ticks)
+        {
+            // 超时通常意味着 DMA 回调没回来，或者总线卡死，交给 recoverFromFailure 做恢复。
+            return recoverFromFailure(Error::Timeout);
+        }
 
-    waiting_task_ = nullptr;
-    transfer_done_ = false;
-    return last_error_ == Error::None;
+        const TickType_t remain_ticks = timeout_ticks - elapsed_ticks;
+        const uint32_t   notified     = ulTaskNotifyTake(pdTRUE, remain_ticks);
+        if (notified == 0U)
+        {
+            return recoverFromFailure(Error::Timeout);
+        }
+
+        if (!completed_ || completed_transfer_id_ != transfer_id)
+        {
+            // 只接受当前事务的完成记录；旧事务晚到的通知直接丢弃。
+            continue;
+        }
+
+        waiting_task_ = nullptr;
+        transmitting_ = false;
+        completed_    = false;
+        return last_error_ == Error::None;
+    }
 }
 
 void I2CBusDMA::completeFromISR(const bool success, const uint32_t hal_error)
 {
     // 这里运行在 HAL 的中断回调上下文，只做状态落盘和唤醒等待任务。
-    transfer_in_flight_ = false;
-    transfer_done_      = true;
-    last_hal_error_     = hal_error;
-    last_error_         = success ? Error::None : Error::HalError;
+    completed_transfer_id_ = current_transfer_id_;
+    completed_             = true;
+    last_hal_error_        = hal_error;
+    last_error_            = success ? Error::None : Error::HalError;
 
     BaseType_t higher_priority_task_woken = pdFALSE;
     if (waiting_task_ != nullptr)
