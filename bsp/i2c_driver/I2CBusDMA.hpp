@@ -79,8 +79,11 @@ private:
     // 在 ISR 中收敛完成状态，并唤醒等待任务。
     void completeFromISR(bool success, uint32_t hal_error);
 
+    // 清空当前事务的软件状态，不改变对外暴露的错误语义。
+    void clearTransferState();
+
     // 记录失败原因并执行恢复流程。
-    bool recoverFromFailure(Error error);
+    bool failAndRecover(Error error, uint32_t hal_error);
 
     // 把实例注册到静态表，供全局 HAL 回调反查。
     static bool registerInstance(I2CBusDMA* instance);

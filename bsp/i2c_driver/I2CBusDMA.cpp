@@ -38,15 +38,7 @@ bool I2CBusDMA::memRead(const uint8_t  device_addr_7bit,
 
     if (status != HAL_OK)
     {
-        // DMA 启动失败时，这次传输根本没有进入 in-flight 状态，直接清理现场即可。
-        transmitting_          = false;
-        completed_             = false;
-        waiting_task_          = nullptr;
-        current_transfer_id_   = 0U;
-        completed_transfer_id_ = 0U;
-        last_error_            = Error::StartFailed;
-        last_hal_error_        = HAL_I2C_GetError(hi2c_);
-        return false;
+        return failAndRecover(Error::StartFailed, HAL_I2C_GetError(hi2c_));
     }
 
     return waitForTransfer(timeout_ms);
@@ -71,14 +63,7 @@ bool I2CBusDMA::memWrite(const uint8_t        device_addr_7bit,
 
     if (status != HAL_OK)
     {
-        transmitting_          = false;
-        completed_             = false;
-        waiting_task_          = nullptr;
-        current_transfer_id_   = 0U;
-        completed_transfer_id_ = 0U;
-        last_error_            = Error::StartFailed;
-        last_hal_error_        = HAL_I2C_GetError(hi2c_);
-        return false;
+        return failAndRecover(Error::StartFailed, HAL_I2C_GetError(hi2c_));
     }
 
     return waitForTransfer(timeout_ms);
@@ -97,14 +82,7 @@ bool I2CBusDMA::read(const uint8_t  device_addr_7bit,
 
     if (status != HAL_OK)
     {
-        transmitting_          = false;
-        completed_             = false;
-        waiting_task_          = nullptr;
-        current_transfer_id_   = 0U;
-        completed_transfer_id_ = 0U;
-        last_error_            = Error::StartFailed;
-        last_hal_error_        = HAL_I2C_GetError(hi2c_);
-        return false;
+        return failAndRecover(Error::StartFailed, HAL_I2C_GetError(hi2c_));
     }
 
     return waitForTransfer(timeout_ms);
@@ -123,14 +101,7 @@ bool I2CBusDMA::write(const uint8_t        device_addr_7bit,
 
     if (status != HAL_OK)
     {
-        transmitting_          = false;
-        completed_             = false;
-        waiting_task_          = nullptr;
-        current_transfer_id_   = 0U;
-        completed_transfer_id_ = 0U;
-        last_error_            = Error::StartFailed;
-        last_hal_error_        = HAL_I2C_GetError(hi2c_);
-        return false;
+        return failAndRecover(Error::StartFailed, HAL_I2C_GetError(hi2c_));
     }
 
     return waitForTransfer(timeout_ms);
@@ -145,11 +116,13 @@ bool I2CBusDMA::recover()
     }
 
     // 恢复前先把软件态清空，避免 manager 误以为还有旧事务未完成。
-    transmitting_          = false;
-    completed_             = false;
-    waiting_task_          = nullptr;
-    current_transfer_id_   = 0U;
-    completed_transfer_id_ = 0U;
+    clearTransferState();
+
+    // 对超时和错误路径，先尽量终止底层 DMA，减少旧完成中断漂到后续事务。
+    if (hi2c_->hdmarx != nullptr)
+        (void) HAL_DMA_Abort(hi2c_->hdmarx);
+    if (hi2c_->hdmatx != nullptr)
+        (void) HAL_DMA_Abort(hi2c_->hdmatx);
 
     // 这里是最轻量的恢复策略：重新 DeInit / Init 外设。
     // 如果现场经常出现 SDA 被从机拉低，正式版本建议再补 GPIO 脉冲恢复。
@@ -167,7 +140,6 @@ bool I2CBusDMA::recover()
         return false;
     }
 
-    last_error_     = Error::None;
     last_hal_error_ = HAL_I2C_ERROR_NONE;
     return true;
 }
@@ -238,14 +210,14 @@ bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
         if (elapsed_ticks >= timeout_ticks)
         {
             // 超时通常意味着 DMA 回调没回来，或者总线卡死，交给 recoverFromFailure 做恢复。
-            return recoverFromFailure(Error::Timeout);
+            return failAndRecover(Error::Timeout, HAL_I2C_GetError(hi2c_));
         }
 
         const TickType_t remain_ticks = timeout_ticks - elapsed_ticks;
         const uint32_t   notified     = ulTaskNotifyTake(pdTRUE, remain_ticks);
         if (notified == 0U)
         {
-            return recoverFromFailure(Error::Timeout);
+            return failAndRecover(Error::Timeout, HAL_I2C_GetError(hi2c_));
         }
 
         if (!completed_ || completed_transfer_id_ != transfer_id)
@@ -257,7 +229,12 @@ bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
         waiting_task_ = nullptr;
         transmitting_ = false;
         completed_    = false;
-        return last_error_ == Error::None;
+        if (last_error_ != Error::None)
+        {
+            return failAndRecover(last_error_, last_hal_error_);
+        }
+
+        return true;
     }
 }
 
@@ -277,12 +254,29 @@ void I2CBusDMA::completeFromISR(const bool success, const uint32_t hal_error)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
-bool I2CBusDMA::recoverFromFailure(const Error error)
+void I2CBusDMA::clearTransferState()
 {
-    // 保留这次失败的上层错误语义，同时尝试把硬件总线拉回可用状态。
-    const bool recovered = recover();
-    if (recovered)
-        last_error_ = error;
+    waiting_task_          = nullptr;
+    transmitting_          = false;
+    completed_             = false;
+    current_transfer_id_   = 0U;
+    completed_transfer_id_ = 0U;
+}
+
+bool I2CBusDMA::failAndRecover(const Error error, const uint32_t hal_error)
+{
+    // 先保留这次失败的上层错误语义，再尽量把总线拉回可用状态。
+    last_error_     = error;
+    last_hal_error_ = hal_error;
+    clearTransferState();
+
+    if (!recover())
+    {
+        last_error_ = Error::RecoveryFailed;
+        return false;
+    }
+
+    last_error_ = error;
     return false;
 }
 
