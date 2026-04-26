@@ -4,6 +4,14 @@
  */
 #include "I2CDevice.hpp"
 
+bool I2CDevice::isDataFresh(const uint32_t now_ms, const uint32_t stale_ms) const
+{
+    if (!data_valid_)
+        return false;
+
+    return stale_ms == 0U || (now_ms - last_success_ms_ <= stale_ms);
+}
+
 UpdateStatus I2CDevice::update(I2CBusDMA& bus, const uint32_t now_ms, const uint32_t timeout_ms)
 {
     if (phase_ == Phase::Trigger)

@@ -48,6 +48,8 @@ public:
 
     [[nodiscard]] bool     isInitialized() const { return initialized_; }
     [[nodiscard]] bool     isOnline() const { return online_; }
+    [[nodiscard]] bool     hasValidData() const { return data_valid_; }
+    [[nodiscard]] bool     isDataFresh(const uint32_t now_ms, const uint32_t stale_ms) const;
     [[nodiscard]] uint32_t lastAttemptMs() const { return last_attempt_ms_; }
     [[nodiscard]] uint32_t lastSuccessMs() const { return last_success_ms_; }
     [[nodiscard]] uint32_t lastFailureMs() const { return last_failure_ms_; }
@@ -69,11 +71,15 @@ protected:
     // 返回 true 表示本轮更新完成并生成了有效数据；返回 false 表示本轮更新失败。
     virtual bool onRead(I2CBusDMA& bus, uint32_t now_ms, uint32_t timeout_ms) = 0;
 
+    // 当父类判定数据失效时，子类可以同步清理自己的缓存标记。
+    virtual void onDataInvalidated() {}
+
     // 记录一次成功更新。
     void markSuccess(uint32_t now_ms)
     {
         initialized_          = true;
         online_               = true;
+        data_valid_           = true;
         last_attempt_ms_      = now_ms;
         last_success_ms_      = now_ms;
         consecutive_failures_ = 0;
@@ -85,7 +91,9 @@ protected:
         last_attempt_ms_ = now_ms;
         last_failure_ms_ = now_ms;
         if (consecutive_failures_ < 255U) ++consecutive_failures_;
-        online_ = false;
+        online_     = false;
+        data_valid_ = false;
+        onDataInvalidated();
     }
 
 private:
@@ -99,6 +107,7 @@ private:
     // 以下字段由 manager 维护，用于健康状态和时间戳统计。
     bool     initialized_{ false };
     bool     online_{ false };
+    bool     data_valid_{ false };
     uint32_t last_attempt_ms_{ 0 };
     uint32_t last_success_ms_{ 0 };
     uint32_t last_failure_ms_{ 0 };
