@@ -22,6 +22,10 @@ bool I2CUpdateManager::registerDevice(I2CDevice&       device,
                                       const uint32_t   phase_ms,
                                       const uint32_t   timeout_ms)
 {
+    // 运行期不支持动态注册；否则会和后台任务并发读写调度表。
+    if (run_flag_ || task_handle_ != nullptr)
+        return false;
+
     if (entry_count_ >= MaxDevices || period_ms == 0U)
         return false;
 

@@ -44,6 +44,13 @@
 
 `I2CUpdateManager` 持有一张设备表，并在后台任务中串行推进每个设备。
 
+当前实现不支持运行期动态注册或反注册设备：
+
+- `registerDevice()` 只能在 `start()` 前调用
+- 一旦后台任务启动，调度表就视为只读
+
+这样做是为了避免注册流程与后台任务并发读写 `entries_` / `entry_count_`。
+
 当设备进入 `Pending` 时，manager 会把 `next_due_ms` 暂时推到：
 
 - `conversionDeadlineMs()`
@@ -66,4 +73,4 @@
 2. 如果设备需要显式触发采样，实现 `onTrigger()`
 3. 在 `onRead()` 中更新自己的缓存
 4. 如果维护了额外的缓存有效标记，实现 `onDataInvalidated()`
-5. 把设备注册到对应总线的 `I2CUpdateManager`
+5. 在 `start()` 前把设备注册到对应总线的 `I2CUpdateManager`

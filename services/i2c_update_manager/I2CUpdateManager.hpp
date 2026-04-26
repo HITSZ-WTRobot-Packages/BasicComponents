@@ -60,7 +60,7 @@ public:
      * @param period_ms 更新周期，单位毫秒
      * @param phase_ms 初始错峰相位，单位毫秒
      * @param timeout_ms 单次事务超时时间，单位毫秒
-     * @return 设备是否注册成功
+     * @return 设备是否注册成功；该接口只能在 `start()` 前调用
      */
     bool registerDevice(I2CDevice& device, uint32_t period_ms, uint32_t phase_ms = 0U, uint32_t timeout_ms = 20U);
 
