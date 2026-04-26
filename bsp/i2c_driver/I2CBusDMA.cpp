@@ -204,6 +204,9 @@ bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
     const TickType_t start_ticks   = xTaskGetTickCount();
     const uint32_t   transfer_id   = current_transfer_id_;
 
+    // 这里必须循环等待，而不能假设一次任务通知就对应当前事务。
+    // 超时恢复后的旧 DMA/IRQ 可能晚到；只有事务编号匹配时，这条完成记录
+    // 才能被当成当前事务的真实结束事件。
     while (true)
     {
         const TickType_t elapsed_ticks = xTaskGetTickCount() - start_ticks;
@@ -241,6 +244,7 @@ bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
 void I2CBusDMA::completeFromISR(const bool success, const uint32_t hal_error)
 {
     // 这里运行在 HAL 的中断回调上下文，只做状态落盘和唤醒等待任务。
+    // 是否属于“当前事务”由等待侧根据 transfer id 再次确认，ISR 里不做复杂判断。
     completed_transfer_id_ = current_transfer_id_;
     completed_             = true;
     last_hal_error_        = hal_error;
@@ -266,6 +270,7 @@ void I2CBusDMA::clearTransferState()
 bool I2CBusDMA::failAndRecover(const Error error, const uint32_t hal_error)
 {
     // 先保留这次失败的上层错误语义，再尽量把总线拉回可用状态。
+    // 即使恢复成功，对外也应当仍然看到“这次事务失败了”，不能把失败语义吞掉。
     last_error_     = error;
     last_hal_error_ = hal_error;
     clearTransferState();
