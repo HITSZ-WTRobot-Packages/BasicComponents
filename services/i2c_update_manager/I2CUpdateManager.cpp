@@ -141,8 +141,10 @@ void I2CUpdateManager::serviceEntry(Entry& entry, const uint32_t now_ms)
     entry.pending_ = false;
     if (status == UpdateStatus::Complete) entry.device->markSuccess(now_ms);
     else                                  entry.device->markFailure(now_ms);
-    // 用本轮名义起点推算下一轮，保证周期精度不受转换等待时间影响。
-    entry.next_due_ms = entry.cycle_start_ms + entry.period_ms;
+    // 如果这一轮已经明显落后，就直接跳到未来最近的周期点，而不是补跑历史周期。
+    const uint32_t elapsed_ms    = now_ms - entry.cycle_start_ms;
+    const uint32_t missed_cycles = elapsed_ms / entry.period_ms;
+    entry.next_due_ms            = entry.cycle_start_ms + (missed_cycles + 1U) * entry.period_ms;
 }
 
 void I2CUpdateManager::run()
