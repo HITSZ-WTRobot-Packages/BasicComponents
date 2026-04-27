@@ -150,6 +150,18 @@ protected:
         consecutive_failures_ = 0;
     }
 
+
+    void markInitialized(uint32_t now_ms)
+    {
+        initialized_          = true;
+        online_               = true;
+        data_valid_           = false;
+        last_attempt_ms_      = now_ms;
+        last_success_ms_      = 0;
+        last_failure_ms_      = 0;
+        consecutive_failures_ = 0;
+    }
+
     /**
      * @brief 记录一次失败更新
      * @param now_ms 当前时间戳，单位毫秒

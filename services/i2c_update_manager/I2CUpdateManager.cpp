@@ -120,8 +120,12 @@ void I2CUpdateManager::serviceEntry(Entry& entry, const uint32_t now_ms)
     {
         const bool ok     = entry.device->init(bus_, entry.timeout_ms);
         entry.initialized = ok;
-        if (ok) entry.device->markSuccess(now_ms);
-        else    entry.device->markFailure(now_ms);
+        if (ok) {
+            entry.device->markInitialized(now_ms);
+        }
+        else {
+            entry.device->markFailure(now_ms);
+        }
         entry.next_due_ms += entry.period_ms;
         return;
     }
