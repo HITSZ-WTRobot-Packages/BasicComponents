@@ -1,0 +1,5 @@
+format_version = 1
+name = "I2CDriver"
+pkgname = "bsp::I2CDriver"
+version = "0.1.0"
+dependencies = ["stm32cubemx"]
