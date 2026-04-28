@@ -1,19 +1,18 @@
 /**
  * @file    I2CBusDMA.hpp
- * @brief   基于 STM32 HAL DMA 和 FreeRTOS 任务通知的单 owner I2C 总线封装
+ * @brief   基于 STM32 HAL DMA 和 CMSIS-RTOS v2 线程标志的单 owner I2C 总线封装
  */
 #pragma once
 
-#include "FreeRTOS.h"
+#include "cmsis_os2.h"
 #include "i2c.h"
-#include "task.h"
 #include <cstddef>
 #include <cstdint>
 
 // 一条 I2C 总线的 DMA 封装。
 //
-// 该类假设总线只有一个 owner task。调用者通过 memRead()/memWrite() 等接口
-// 发起 DMA 事务，然后阻塞等待 HAL 回调通过任务通知唤醒自己。这样对上层
+// 该类假设总线只有一个 owner thread。调用者通过 memRead()/memWrite() 等接口
+// 发起 DMA 事务，然后阻塞等待 HAL 回调通过线程标志唤醒自己。这样对上层
 // 看起来仍是同步接口，但底层传输期间不会忙等占用 CPU。
 class I2CBusDMA final
 {
@@ -25,6 +24,7 @@ public:
     {
         None,           ///< 最近一次事务成功完成
         InvalidHandle,  ///< HAL I2C 句柄无效
+        InvalidContext, ///< 调用上下文不是可阻塞等待的 CMSIS 线程
         Busy,           ///< 总线或驱动当前忙碌，无法启动新事务
         StartFailed,    ///< DMA 事务启动失败
         Timeout,        ///< 等待完成超时
@@ -149,7 +149,7 @@ private:
     bool waitForTransfer(uint32_t timeout_ms);
 
     /**
-     * @brief 在 ISR 中记录完成状态并唤醒等待任务
+     * @brief 在 ISR 中记录完成状态并唤醒等待线程
      * @param success 本次完成是否成功
      * @param hal_error HAL 层返回的错误码
      */
@@ -176,7 +176,7 @@ private:
     static bool registerInstance(I2CBusDMA* instance);
 
     I2C_HandleTypeDef* hi2c_{ nullptr };                     ///< 绑定的 HAL I2C 句柄
-    TaskHandle_t       waiting_task_{ nullptr };             ///< 当前阻塞等待事务完成的任务句柄
+    osThreadId_t       waiting_thread_{ nullptr };           ///< 当前阻塞等待事务完成的线程句柄
     volatile bool      transmitting_{ false };               ///< 当前是否已有事务启动且尚未完成收敛
     volatile bool      completed_{ false };                  ///< 当前事务是否已收到完成记录
     volatile uint32_t  next_transfer_id_{ 1U };              ///< 下一次启动事务时要分配的事务编号

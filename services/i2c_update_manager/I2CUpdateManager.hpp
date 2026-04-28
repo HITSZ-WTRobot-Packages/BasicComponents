@@ -4,16 +4,15 @@
  */
 #pragma once
 
-#include "FreeRTOS.h"
 #include "I2CBusDMA.hpp"
 #include "I2CDevice.hpp"
-#include "task.h"
+#include "cmsis_os2.h"
 #include <cstddef>
 #include <cstdint>
 
 // 单条 I2C 总线的周期调度器。不保证精准，可能有1~2ms的时间误差，适用于不那么精确周期的数据获取
 //
-// 该类拥有一个 FreeRTOS 任务，并串行调度注册到同一条总线上的所有设备。
+// 该类拥有一个 CMSIS-RTOS v2 后台线程，并串行调度注册到同一条总线上的所有设备。
 // 每个设备由一个 Entry 描述其周期、相位和超时。manager 每次只推进一个设备，
 // 从而保证总线上始终只有一个活跃事务。
 class I2CUpdateManager final
@@ -22,14 +21,14 @@ public:
     static constexpr std::size_t MaxDevices = 8;
 
     /**
-     * @brief 描述 manager 自身任务的运行配置
+     * @brief 描述 manager 自身线程的运行配置
      */
     struct Config
     {
-        const char*    task_name{ "I2CUpdate" };          ///< 调度任务名称
-        uint16_t       stack_words{ 512 };                ///< 调度任务栈大小，单位 word
-        UBaseType_t    priority{ tskIDLE_PRIORITY + 2U }; ///< 调度任务优先级
-        uint32_t       max_sleep_ms{ 500U };              ///< 空闲时单次最长休眠时间，单位毫秒
+        const char* task_name{ "I2CUpdate" };                  ///< 调度线程名称
+        uint32_t    stack_size_bytes{ 512U * sizeof(uint32_t) }; ///< 调度线程栈大小，单位 byte
+        osPriority_t priority{ osPriorityNormal }; ///< 调度线程优先级
+        uint32_t    max_sleep_ms{ 500U };          ///< 空闲时单次最长休眠时间，单位毫秒
     };
 
     /**
@@ -65,25 +64,25 @@ public:
     bool registerDevice(I2CDevice& device, uint32_t period_ms, uint32_t phase_ms = 0U, uint32_t timeout_ms = 20U);
 
     /**
-     * @brief 使用默认配置创建并启动后台调度任务
-     * @return 调度任务是否成功启动
+     * @brief 使用默认配置创建并启动后台调度线程
+     * @return 调度线程是否成功启动
      */
     bool start();
 
     /**
-     * @brief 使用给定配置创建并启动后台调度任务
-     * @param config 调度任务配置
-     * @return 调度任务是否成功启动
+     * @brief 使用给定配置创建并启动后台调度线程
+     * @param config 调度线程配置
+     * @return 调度线程是否成功启动
      */
     bool start(const Config& config);
 
     /**
-     * @brief 请求后台任务退出
+     * @brief 请求后台调度线程退出
      */
     void stop();
 
     /**
-     * @brief 查询调度任务当前是否在运行
+     * @brief 查询调度线程当前是否在运行
      * @return 调度器是否处于运行状态
      */
     [[nodiscard]] bool        isRunning() const { return run_flag_; }
@@ -116,7 +115,7 @@ private:
     void     serviceEntry(Entry& entry, uint32_t now_ms);
 
     /**
-     * @brief FreeRTOS 任务入口的静态桥接函数
+     * @brief CMSIS-RTOS v2 线程入口的静态桥接函数
      * @param pvParameters 传入的调度器对象指针
      */
     static void taskEntry(void* pvParameters) {
@@ -125,14 +124,14 @@ private:
     }
 
     /**
-     * @brief 后台调度任务主循环
+     * @brief 后台调度线程主循环
      */
     void run();
 
     I2CBusDMA&   bus_;                        ///< 当前调度器独占管理的 I2C 总线
     Entry        entries_[MaxDevices]{};      ///< 已注册设备的调度表
     std::size_t  entry_count_{ 0 };           ///< 当前已注册设备数量
-    TaskHandle_t task_handle_{ nullptr };     ///< 后台调度任务句柄
-    Config       config_{};                   ///< 当前采用的任务配置
-    bool         run_flag_{ false };          ///< 后台调度任务是否应继续运行
+    osThreadId_t task_handle_{ nullptr };     ///< 后台调度线程句柄
+    Config       config_{};                   ///< 当前采用的线程配置
+    bool         run_flag_{ false };          ///< 后台调度线程是否应继续运行
 };

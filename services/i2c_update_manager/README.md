@@ -42,7 +42,7 @@
 
 ## I2CUpdateManager
 
-`I2CUpdateManager` 持有一张设备表，并在后台任务中串行推进每个设备。
+`I2CUpdateManager` 持有一张设备表，并在后台 CMSIS-RTOS v2 线程中串行推进每个设备。
 
 当前实现不支持运行期动态注册或反注册设备：
 
@@ -63,7 +63,7 @@
 
 这样做的目的是：
 
-- 避免任务卡顿后连续 replay backlog
+- 避免线程卡顿后连续 replay backlog
 - 保留周期相位的基本一致性
 - 避免单个设备恢复后短时间占满整条总线
 

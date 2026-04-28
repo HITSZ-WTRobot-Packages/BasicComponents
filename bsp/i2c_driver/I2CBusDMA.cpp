@@ -4,6 +4,29 @@
  */
 #include "I2CBusDMA.hpp"
 
+namespace
+{
+constexpr uint32_t TransferCompleteFlag = 1U << 0;
+
+uint32_t kernelTicksFromMs(uint32_t timeout_ms)
+{
+    if (timeout_ms == 0U)
+        timeout_ms = 1U;
+
+    const uint32_t tick_freq = osKernelGetTickFreq();
+    if (tick_freq == 0U)
+        return timeout_ms;
+
+    const uint64_t ticks = (static_cast<uint64_t>(timeout_ms) * tick_freq + 999ULL) / 1000ULL;
+    return static_cast<uint32_t>(ticks == 0U ? 1ULL : ticks);
+}
+
+bool isThreadFlagsError(const uint32_t flags)
+{
+    return (flags & osFlagsError) != 0U;
+}
+} // namespace
+
 I2CBusDMA* I2CBusDMA::instances_[I2CBusDMA::MaxInstances] = { nullptr };
 
 I2CBusDMA::I2CBusDMA(I2C_HandleTypeDef* hi2c) : hi2c_(hi2c)
@@ -29,7 +52,7 @@ bool I2CBusDMA::memRead(const uint8_t  device_addr_7bit,
                         const uint16_t len,
                         const uint32_t timeout_ms)
 {
-    // 发起 DMA 之前先确认总线空闲，并记录当前等待完成的任务。
+    // 发起 DMA 之前先确认总线空闲，并记录当前等待完成的线程。
     if (!prepareTransfer())
         return false;
 
@@ -177,6 +200,12 @@ bool I2CBusDMA::prepareTransfer()
         return false;
     }
 
+    if (osKernelGetState() != osKernelRunning)
+    {
+        last_error_ = Error::InvalidContext;
+        return false;
+    }
+
     if (transmitting_ || (HAL_I2C_GetState(hi2c_) != HAL_I2C_STATE_READY))
     {
         // 这套封装默认一条总线同一时刻只允许一个事务在飞。
@@ -184,8 +213,14 @@ bool I2CBusDMA::prepareTransfer()
         return false;
     }
 
-    // 记录当前调用任务，DMA 完成后通过任务通知把它唤醒。
-    waiting_task_          = xTaskGetCurrentTaskHandle();
+    // 记录当前调用线程，DMA 完成后通过线程标志把它唤醒。
+    waiting_thread_ = osThreadGetId();
+    if (waiting_thread_ == nullptr)
+    {
+        last_error_ = Error::InvalidContext;
+        return false;
+    }
+
     transmitting_          = true;
     completed_             = false;
     current_transfer_id_   = next_transfer_id_++;
@@ -193,45 +228,49 @@ bool I2CBusDMA::prepareTransfer()
     last_error_            = Error::None;
     last_hal_error_        = HAL_I2C_ERROR_NONE;
 
-    // 清掉可能残留的通知，避免把旧完成事件误当成本次 DMA 完成。
-    (void) ulTaskNotifyTake(pdTRUE, 0);
+    // 清掉可能残留的线程标志，避免把旧完成事件误当成本次 DMA 完成。
+    (void) osThreadFlagsClear(TransferCompleteFlag);
     return true;
 }
 
 bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
 {
-    const TickType_t timeout_ticks = pdMS_TO_TICKS(timeout_ms == 0U ? 1U : timeout_ms);
-    const TickType_t start_ticks   = xTaskGetTickCount();
-    const uint32_t   transfer_id   = current_transfer_id_;
+    const uint32_t timeout_ticks = kernelTicksFromMs(timeout_ms);
+    const uint32_t start_ticks   = osKernelGetTickCount();
+    const uint32_t transfer_id   = current_transfer_id_;
 
-    // 这里必须循环等待，而不能假设一次任务通知就对应当前事务。
+    // 这里必须循环等待，而不能假设一次线程标志就对应当前事务。
     // 超时恢复后的旧 DMA/IRQ 可能晚到；只有事务编号匹配时，这条完成记录
     // 才能被当成当前事务的真实结束事件。
     while (true)
     {
-        const TickType_t elapsed_ticks = xTaskGetTickCount() - start_ticks;
+        const uint32_t elapsed_ticks = osKernelGetTickCount() - start_ticks;
         if (elapsed_ticks >= timeout_ticks)
         {
             // 超时通常意味着 DMA 回调没回来，或者总线卡死，交给 recoverFromFailure 做恢复。
             return failAndRecover(Error::Timeout, HAL_I2C_GetError(hi2c_));
         }
 
-        const TickType_t remain_ticks = timeout_ticks - elapsed_ticks;
-        const uint32_t   notified     = ulTaskNotifyTake(pdTRUE, remain_ticks);
-        if (notified == 0U)
+        const uint32_t remain_ticks = timeout_ticks - elapsed_ticks;
+        const uint32_t wait_result  = osThreadFlagsWait(TransferCompleteFlag, osFlagsWaitAny, remain_ticks);
+        if (wait_result == osFlagsErrorTimeout)
         {
             return failAndRecover(Error::Timeout, HAL_I2C_GetError(hi2c_));
+        }
+        if (isThreadFlagsError(wait_result))
+        {
+            return failAndRecover(Error::InvalidContext, HAL_I2C_ERROR_NONE);
         }
 
         if (!completed_ || completed_transfer_id_ != transfer_id)
         {
-            // 只接受当前事务的完成记录；旧事务晚到的通知直接丢弃。
+            // 只接受当前事务的完成记录；旧事务晚到的线程标志直接丢弃。
             continue;
         }
 
-        waiting_task_ = nullptr;
-        transmitting_ = false;
-        completed_    = false;
+        waiting_thread_ = nullptr;
+        transmitting_   = false;
+        completed_      = false;
         if (last_error_ != Error::None)
         {
             return failAndRecover(last_error_, last_hal_error_);
@@ -243,24 +282,22 @@ bool I2CBusDMA::waitForTransfer(const uint32_t timeout_ms)
 
 void I2CBusDMA::completeFromISR(const bool success, const uint32_t hal_error)
 {
-    // 这里运行在 HAL 的中断回调上下文，只做状态落盘和唤醒等待任务。
+    // 这里运行在 HAL 的中断回调上下文，只做状态落盘和唤醒等待线程。
     // 是否属于“当前事务”由等待侧根据 transfer id 再次确认，ISR 里不做复杂判断。
     completed_transfer_id_ = current_transfer_id_;
     completed_             = true;
     last_hal_error_        = hal_error;
     last_error_            = success ? Error::None : Error::HalError;
 
-    BaseType_t higher_priority_task_woken = pdFALSE;
-    if (waiting_task_ != nullptr)
+    if (waiting_thread_ != nullptr)
     {
-        vTaskNotifyGiveFromISR(waiting_task_, &higher_priority_task_woken);
+        (void) osThreadFlagsSet(waiting_thread_, TransferCompleteFlag);
     }
-    portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
 void I2CBusDMA::clearTransferState()
 {
-    waiting_task_          = nullptr;
+    waiting_thread_        = nullptr;
     transmitting_          = false;
     completed_             = false;
     current_transfer_id_   = 0U;

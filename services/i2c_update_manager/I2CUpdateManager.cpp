@@ -13,6 +13,19 @@ bool tickReached(const uint32_t now_ms, const uint32_t due_ms)
 {
     return static_cast<int32_t>(now_ms - due_ms) >= 0;
 }
+
+uint32_t kernelTicksFromMs(uint32_t timeout_ms)
+{
+    if (timeout_ms == 0U)
+        timeout_ms = 1U;
+
+    const uint32_t tick_freq = osKernelGetTickFreq();
+    if (tick_freq == 0U)
+        return timeout_ms;
+
+    const uint64_t ticks = (static_cast<uint64_t>(timeout_ms) * tick_freq + 999ULL) / 1000ULL;
+    return static_cast<uint32_t>(ticks == 0U ? 1ULL : ticks);
+}
 } // namespace
 
 I2CUpdateManager::I2CUpdateManager(I2CBusDMA& bus) : bus_(bus) {}
@@ -50,18 +63,23 @@ bool I2CUpdateManager::start(const Config& config)
 {
     if (run_flag_)
         return true;
+    if (task_handle_ != nullptr)
+        return false;
 
-    // 先落盘配置，再启动后台任务，避免任务先跑起来但配置还没写完。
+    // 先落盘配置，再启动后台线程，避免线程先跑起来但配置还没写完。
     config_   = config;
     run_flag_ = true;
 
-    const BaseType_t result =
-        xTaskCreate(taskEntry, config_.task_name, config_.stack_words, this, config_.priority, &task_handle_);
+    const osThreadAttr_t attr{
+        .name       = config_.task_name,
+        .stack_size = config_.stack_size_bytes,
+        .priority   = config_.priority,
+    };
 
-    if (result != pdPASS)
+    task_handle_ = osThreadNew(taskEntry, this, &attr);
+    if (task_handle_ == nullptr)
     {
         run_flag_    = false;
-        task_handle_ = nullptr;
         return false;
     }
 
@@ -165,14 +183,14 @@ void I2CUpdateManager::run()
         {
             // 一次循环只推进一个设备，确保这条总线始终是串行访问。
             serviceEntry(*entry, now_ms);
-            taskYIELD();
+            osThreadYield();
             continue;
         }
 
         // 当前没有到期设备时，按最近到期时间进入短暂休眠。
-        vTaskDelay(pdMS_TO_TICKS(computeSleepMs(now_ms)));
+        osDelay(kernelTicksFromMs(computeSleepMs(now_ms)));
     }
 
+    run_flag_    = false;
     task_handle_ = nullptr;
-    vTaskDelete(nullptr);
 }
