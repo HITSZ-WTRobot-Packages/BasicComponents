@@ -17,6 +17,15 @@
 class I2CBusDMA final
 {
 public:
+    struct BusPins
+    {
+        GPIO_TypeDef* scl_port;
+        uint16_t      scl_pin;
+        GPIO_TypeDef* sda_port;
+        uint16_t      sda_pin;
+        uint32_t      alternate_function;
+    };
+
     /**
      * @brief 描述一次总线事务的最终错误状态
      */
@@ -35,8 +44,9 @@ public:
     /**
      * @brief 使用 HAL I2C 句柄构造总线对象
      * @param hi2c 要绑定的 HAL I2C 句柄
+     * @param pins 当前总线的 SCL/SDA 引脚定义
      */
-    explicit I2CBusDMA(I2C_HandleTypeDef* hi2c);
+    I2CBusDMA(I2C_HandleTypeDef* hi2c, BusPins pins);
 
     /**
      * @brief 获取底层 HAL I2C 句柄
@@ -168,6 +178,8 @@ private:
      */
     bool failAndRecover(Error error, uint32_t hal_error);
 
+    bool recoverBusLines();
+
     /**
      * @brief 把实例注册到静态反查表
      * @param instance 要注册的总线对象
@@ -176,6 +188,7 @@ private:
     static bool registerInstance(I2CBusDMA* instance);
 
     I2C_HandleTypeDef* hi2c_{ nullptr };                     ///< 绑定的 HAL I2C 句柄
+    BusPins            pins_{ nullptr, 0U, nullptr, 0U, 0U }; ///< 当前总线的引脚定义
     osThreadId_t       waiting_thread_{ nullptr };           ///< 当前阻塞等待事务完成的线程句柄
     volatile bool      transmitting_{ false };               ///< 当前是否已有事务启动且尚未完成收敛
     volatile bool      completed_{ false };                  ///< 当前事务是否已收到完成记录

@@ -7,6 +7,7 @@
 namespace
 {
 constexpr uint32_t TransferCompleteFlag = 1U << 0;
+constexpr uint32_t BusPulseDelayCycles  = 256U;
 
 uint32_t kernelTicksFromMs(uint32_t timeout_ms)
 {
@@ -25,11 +26,19 @@ bool isThreadFlagsError(const uint32_t flags)
 {
     return (flags & osFlagsError) != 0U;
 }
+
+void shortDelay()
+{
+    for (volatile uint32_t i = 0; i < BusPulseDelayCycles; ++i)
+    {
+        __NOP();
+    }
+}
 } // namespace
 
 I2CBusDMA* I2CBusDMA::instances_[I2CBusDMA::MaxInstances] = { nullptr };
 
-I2CBusDMA::I2CBusDMA(I2C_HandleTypeDef* hi2c) : hi2c_(hi2c)
+I2CBusDMA::I2CBusDMA(I2C_HandleTypeDef* hi2c, const BusPins pins) : hi2c_(hi2c), pins_(pins)
 {
     // 构造时把当前 bus 实例登记到静态表中，后续 HAL 全局回调才能反查到对象。
     if (hi2c_ != nullptr && registerInstance(this))
@@ -132,7 +141,7 @@ bool I2CBusDMA::write(const uint8_t        device_addr_7bit,
 
 bool I2CBusDMA::recover()
 {
-    if (hi2c_ == nullptr)
+    if (hi2c_ == nullptr || pins_.scl_port == nullptr || pins_.sda_port == nullptr)
     {
         last_error_ = Error::InvalidHandle;
         return false;
@@ -147,12 +156,17 @@ bool I2CBusDMA::recover()
     if (hi2c_->hdmatx != nullptr)
         (void) HAL_DMA_Abort(hi2c_->hdmatx);
 
-    // 这里是最轻量的恢复策略：重新 DeInit / Init 外设。
-    // 如果现场经常出现 SDA 被从机拉低，正式版本建议再补 GPIO 脉冲恢复。
     if (HAL_I2C_DeInit(hi2c_) != HAL_OK)
     {
         last_error_     = Error::RecoveryFailed;
         last_hal_error_ = HAL_I2C_GetError(hi2c_);
+        return false;
+    }
+
+    if (!recoverBusLines())
+    {
+        last_error_     = Error::RecoveryFailed;
+        last_hal_error_ = HAL_I2C_ERROR_TIMEOUT;
         return false;
     }
 
@@ -165,6 +179,44 @@ bool I2CBusDMA::recover()
 
     last_hal_error_ = HAL_I2C_ERROR_NONE;
     return true;
+}
+
+bool I2CBusDMA::recoverBusLines()
+{
+    GPIO_InitTypeDef gpio_init{};
+    gpio_init.Pin   = pins_.scl_pin | pins_.sda_pin;
+    gpio_init.Mode  = GPIO_MODE_OUTPUT_OD;
+    gpio_init.Pull  = GPIO_NOPULL;
+    gpio_init.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    HAL_GPIO_Init(pins_.scl_port, &gpio_init);
+
+    HAL_GPIO_WritePin(pins_.scl_port, pins_.scl_pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(pins_.sda_port, pins_.sda_pin, GPIO_PIN_SET);
+    shortDelay();
+
+    for (uint32_t pulse = 0; pulse < 9U && HAL_GPIO_ReadPin(pins_.sda_port, pins_.sda_pin) == GPIO_PIN_RESET; ++pulse)
+    {
+        HAL_GPIO_WritePin(pins_.scl_port, pins_.scl_pin, GPIO_PIN_RESET);
+        shortDelay();
+        HAL_GPIO_WritePin(pins_.scl_port, pins_.scl_pin, GPIO_PIN_SET);
+        shortDelay();
+    }
+
+    HAL_GPIO_WritePin(pins_.sda_port, pins_.sda_pin, GPIO_PIN_RESET);
+    shortDelay();
+    HAL_GPIO_WritePin(pins_.scl_port, pins_.scl_pin, GPIO_PIN_SET);
+    shortDelay();
+    HAL_GPIO_WritePin(pins_.sda_port, pins_.sda_pin, GPIO_PIN_SET);
+    shortDelay();
+
+    const bool released = HAL_GPIO_ReadPin(pins_.scl_port, pins_.scl_pin) == GPIO_PIN_SET &&
+                          HAL_GPIO_ReadPin(pins_.sda_port, pins_.sda_pin) == GPIO_PIN_SET;
+
+    gpio_init.Mode      = GPIO_MODE_AF_OD;
+    gpio_init.Alternate = pins_.alternate_function;
+    HAL_GPIO_Init(pins_.scl_port, &gpio_init);
+
+    return released;
 }
 
 I2CBusDMA* I2CBusDMA::fromHandle(I2C_HandleTypeDef* hi2c)
