@@ -121,6 +121,30 @@ public:
     }
 
     /**
+     * @brief 查看队头元素（不弹出）。
+     *
+     * @return 队头元素指针，队列为空时返回 nullptr。
+     */
+    [[nodiscard]] const T* front() const noexcept
+    {
+        if (head_ == tail_)
+            return nullptr;
+        return &buffer_[tail_];
+    }
+
+    /**
+     * @brief 查看队尾元素（最新入队的元素，不弹出）。
+     *
+     * @return 队尾元素指针，队列为空时返回 nullptr。
+     */
+    [[nodiscard]] const T* back() const noexcept
+    {
+        if (head_ == tail_)
+            return nullptr;
+        return &buffer_[prev(head_)];
+    }
+
+    /**
      * @brief 清空缓冲区中的所有元素。
      *
      * 这个操作只会复位读写指针，不会改写底层存储。
@@ -161,6 +185,11 @@ private:
     static constexpr std::size_t next(const std::size_t idx) noexcept
     {
         return (idx + 1) % Capacity;
+    }
+
+    static constexpr std::size_t prev(const std::size_t idx) noexcept
+    {
+        return idx == 0 ? Capacity - 1 : idx - 1;
     }
 };
 
