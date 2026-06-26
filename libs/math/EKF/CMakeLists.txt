@@ -1,7 +1,7 @@
 add_library(__Math_EKF INTERFACE)
 
 target_include_directories(__Math_EKF INTERFACE
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/
 )
 
 # link dependencies if any

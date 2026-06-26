@@ -1,3 +1,5 @@
+format_version = 1
 name = "LinearAlgebra"
 pkgname = "Math::LinearAlgebra"
 version = "0.1.0"
+dependencies = []
