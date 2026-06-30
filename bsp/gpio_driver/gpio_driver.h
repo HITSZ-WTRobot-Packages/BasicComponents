@@ -45,6 +45,8 @@ typedef struct
      * @brief GPIO 句柄。
      *
      * 这里把端口和引脚打包成一个轻量结构体，便于在中断回调和普通业务函数之间传递。
+     *
+     * @deprecated 新代码请使用 bsp::gpio::GpioPin。
      */
     GPIO_TypeDef* port;
     uint16_t      pin;
@@ -54,7 +56,10 @@ typedef struct
  * @brief 读取 GPIO 输入状态。
  *
  * 直接转发到底层 HAL 接口。
+ *
+ * @deprecated 请使用 bsp::gpio::GpioPin::read()。
  */
+__attribute__((deprecated("Use bsp::gpio::GpioPin::read() instead")))
 static inline GPIO_PinState GPIO_ReadPin(GPIO_t* hgpio)
 {
     return HAL_GPIO_ReadPin(hgpio->port, hgpio->pin);
@@ -62,7 +67,10 @@ static inline GPIO_PinState GPIO_ReadPin(GPIO_t* hgpio)
 
 /**
  * @brief 写入 GPIO 输出状态。
+ *
+ * @deprecated 请使用 bsp::gpio::GpioPin::write()。
  */
+__attribute__((deprecated("Use bsp::gpio::GpioPin::write() instead")))
 static inline void GPIO_WritePin(GPIO_t* hgpio, const GPIO_PinState PinState)
 {
     HAL_GPIO_WritePin(hgpio->port, hgpio->pin, PinState);
@@ -70,23 +78,32 @@ static inline void GPIO_WritePin(GPIO_t* hgpio, const GPIO_PinState PinState)
 
 /**
  * @brief 输出高电平。
+ *
+ * @deprecated 请使用 bsp::gpio::GpioPin::set()。
  */
+__attribute__((deprecated("Use bsp::gpio::GpioPin::set() instead")))
 static inline void GPIO_SetPin(GPIO_t* hgpio)
 {
-    GPIO_WritePin(hgpio, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(hgpio->port, hgpio->pin, GPIO_PIN_SET);
 }
 
 /**
  * @brief 输出低电平。
+ *
+ * @deprecated 请使用 bsp::gpio::GpioPin::reset()。
  */
+__attribute__((deprecated("Use bsp::gpio::GpioPin::reset() instead")))
 static inline void GPIO_ResetPin(GPIO_t* hgpio)
 {
-    GPIO_WritePin(hgpio, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(hgpio->port, hgpio->pin, GPIO_PIN_RESET);
 }
 
 /**
  * @brief 翻转 GPIO 输出状态。
+ *
+ * @deprecated 请使用 bsp::gpio::GpioPin::toggle()。
  */
+__attribute__((deprecated("Use bsp::gpio::GpioPin::toggle() instead")))
 static inline void GPIO_TogglePin(GPIO_t* hgpio)
 {
     HAL_GPIO_TogglePin(hgpio->port, hgpio->pin);
@@ -97,10 +114,15 @@ static inline void GPIO_TogglePin(GPIO_t* hgpio)
  * @brief EXTI 回调函数签名。
  *
  * 回调里带上触发计数和用户数据，通常用于去抖、边沿累计或者事件分发。
+ *
+ * @deprecated 新代码请使用 bsp::gpio::ExtiCallback。
  */
 typedef void (*EXTI_Callback)(const GPIO_t* gpio, uint32_t counter, void* data);
+__attribute__((deprecated("Use bsp::gpio::RegisterExtiCallback() instead")))
 void GPIO_EXTI_RegisterCallback(const GPIO_t* gpio, EXTI_Callback callback, void* data);
+__attribute__((deprecated("Use bsp::gpio::UnregisterExtiCallback() instead")))
 void GPIO_EXTI_UnregisterCallback(const GPIO_t* gpio);
+__attribute__((deprecated("Use bsp::gpio::DispatchExtiInterrupt() instead")))
 void GPIO_EXTI_Callback(const uint16_t GPIO_Pin);
 #endif
 

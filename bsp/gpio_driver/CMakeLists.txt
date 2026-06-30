@@ -1,10 +1,11 @@
 add_library(BspGPIODriver STATIC
     "./gpio_driver.c"
+    "./gpio_driver.cpp"
 )
 
 target_include_directories(BspGPIODriver
     PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/
 )
 
 # link dependencies if any
