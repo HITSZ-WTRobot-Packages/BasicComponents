@@ -20,9 +20,9 @@ namespace
 // 以 pin 位序号作为数组索引，避免中断上下文中的查表开销。
 struct ExtiSlot
 {
-    const GpioPin* gpio;     ///< 被注册的 GPIO
-    uint32_t       counter;  ///< 触发次数
-    ExtiCallback   callback; ///< 回调
+    const GpioPinInput* gpio;     ///< 被注册的 GPIO
+    uint32_t            counter;  ///< 触发次数
+    ExtiCallback        callback; ///< 回调
 };
 
 ExtiSlot g_exti_callback_map[16];
@@ -42,17 +42,17 @@ size_t pin_to_index(const uint16_t pin)
 }
 } // namespace
 
-void RegisterExtiCallback(const GpioPin* gpio, const ExtiCallback callback)
+void RegisterExtiCallback(const GpioPinInput* gpio, const ExtiCallback callback)
 {
-    const size_t index                   = pin_to_index(gpio->pin);
+    const size_t index                  = pin_to_index(gpio->pin);
     g_exti_callback_map[index].gpio     = gpio;
     g_exti_callback_map[index].callback = callback;
     g_exti_callback_map[index].counter  = 0;
 }
 
-void UnregisterExtiCallback(const GpioPin* gpio)
+void UnregisterExtiCallback(const GpioPinInput* gpio)
 {
-    const size_t index                   = pin_to_index(gpio->pin);
+    const size_t index                  = pin_to_index(gpio->pin);
     g_exti_callback_map[index].gpio     = nullptr;
     g_exti_callback_map[index].callback = nullptr;
     g_exti_callback_map[index].counter  = 0;
@@ -61,7 +61,8 @@ void UnregisterExtiCallback(const GpioPin* gpio)
 void DispatchExtiInterrupt(const uint16_t GPIO_Pin)
 {
     const size_t index = pin_to_index(GPIO_Pin);
-    if (g_exti_callback_map[index].gpio != nullptr && g_exti_callback_map[index].callback != nullptr)
+    if (g_exti_callback_map[index].gpio != nullptr &&
+        g_exti_callback_map[index].callback != nullptr)
     {
         g_exti_callback_map[index].counter++;
         g_exti_callback_map[index].callback(g_exti_callback_map[index].gpio,
