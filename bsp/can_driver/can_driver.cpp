@@ -27,10 +27,323 @@
 
 #include <cassert>
 #include <cstring>
+#include <cstddef>
+#include <array>
+#include <variant>
 
+/**
+ * FDCAN 版本
+ */
+#if CAN_DRIVER_FDCAN_ENABLED
 namespace
 {
+struct CAN_MessageDef
+{
+    FDCAN_TxHeaderTypeDef header;
+    uint8_t               data[64];
+};
 
+using FifoReceiveCallback = std::variant<FDCAN_FifoReceiveCallback_t, CAN_FifoReceiveCallback_t>;
+
+struct CAN_CallbackMap
+{
+    FDCAN_HandleTypeDef* hcan{ nullptr };
+
+    FifoReceiveCallback callbacks[CAN_MAX_CALLBACK_NUM]{};
+
+    uint32_t callback_count{ 0 };
+
+#    if FDCAN_ENABLE_SOFT_TX_QUEUE
+    libs::RingBuffer<CAN_MessageDef, FDCAN_TX_QUEUE_SIZE + 1, true> buffer;
+#    endif
+};
+
+CAN_CallbackMap maps[CAN_NUM];
+size_t          map_size = 0;
+
+CAN_CallbackMap* get_map(const FDCAN_HandleTypeDef* hcan)
+{
+    for (size_t i = 0; i < map_size; i++)
+        if (maps[i].hcan == hcan)
+            return &maps[i];
+    return nullptr;
+}
+
+constexpr uint32_t FDCAN_DLC_Bytes(const uint32_t dlc)
+{
+    switch (dlc)
+    {
+    case FDCAN_DLC_BYTES_0:
+        return 0;
+    case FDCAN_DLC_BYTES_1:
+        return 1;
+    case FDCAN_DLC_BYTES_2:
+        return 2;
+    case FDCAN_DLC_BYTES_3:
+        return 3;
+    case FDCAN_DLC_BYTES_4:
+        return 4;
+    case FDCAN_DLC_BYTES_5:
+        return 5;
+    case FDCAN_DLC_BYTES_6:
+        return 6;
+    case FDCAN_DLC_BYTES_7:
+        return 7;
+    case FDCAN_DLC_BYTES_8:
+        return 8;
+    case FDCAN_DLC_BYTES_12:
+        return 12;
+    case FDCAN_DLC_BYTES_16:
+        return 16;
+    case FDCAN_DLC_BYTES_20:
+        return 20;
+    case FDCAN_DLC_BYTES_24:
+        return 24;
+    case FDCAN_DLC_BYTES_32:
+        return 32;
+    case FDCAN_DLC_BYTES_48:
+        return 48;
+    case FDCAN_DLC_BYTES_64:
+        return 64;
+    default:
+        return 0;
+    }
+}
+
+constexpr uint32_t can_dlc_to_fdcan_dlc(const uint32_t dlc)
+{
+    constexpr std::array<uint32_t, 9> can_dlcs{ FDCAN_DLC_BYTES_0, FDCAN_DLC_BYTES_1,
+                                                FDCAN_DLC_BYTES_2, FDCAN_DLC_BYTES_3,
+                                                FDCAN_DLC_BYTES_4, FDCAN_DLC_BYTES_5,
+                                                FDCAN_DLC_BYTES_6, FDCAN_DLC_BYTES_7,
+                                                FDCAN_DLC_BYTES_8 };
+    if (dlc > 8)
+        return FDCAN_DLC_BYTES_0;
+    return can_dlcs[dlc];
+}
+} // namespace
+
+void FDCAN_RxDispatch(FDCAN_HandleTypeDef* hcan, const uint32_t fifo)
+{
+    while (HAL_FDCAN_GetRxFifoFillLevel(hcan, fifo) > 0)
+    {
+        FDCAN_RxHeaderTypeDef header;
+        uint8_t               data[64]{};
+        if (HAL_FDCAN_GetRxMessage(hcan, fifo, &header, data) != HAL_OK)
+        {
+            Error_Handler();
+            return;
+        }
+        const auto* map = get_map(hcan);
+        if (map != nullptr)
+            for (uint32_t i = 0; i < map->callback_count; i++)
+            {
+                std::visit(
+                        [&](auto callback)
+                        {
+                            if (callback == nullptr)
+                                return;
+                            using T = decltype(callback);
+
+                            if constexpr (std::is_same_v<T, FDCAN_FifoReceiveCallback_t>)
+                            {
+                                // 如果为 FDCAN 风格的回调函数，直接调用
+                                callback(hcan, &header, data);
+                            }
+                            else if constexpr (std::is_same_v<T, CAN_FifoReceiveCallback_t>)
+                            {
+                                // 如果为 bxCAN 风格的回调函数，转换帧头后再调用
+                                if (header.FDFormat != FDCAN_FRAME_CLASSIC)
+                                    return;
+                                const bool isExtId = header.IdType == FDCAN_EXTENDED_ID;
+                                const CAN_RxHeaderTypeDef can_header{
+                                    .StdId = header.Identifier,
+                                    .ExtId = header.Identifier,
+                                    .IDE   = isExtId ? CAN_ID_EXT : CAN_ID_STD,
+                                    .RTR   = header.RxFrameType == FDCAN_DATA_FRAME ? CAN_RTR_DATA
+                                                                                    : CAN_RTR_REMOTE,
+                                    .DLC   = FDCAN_DLC_Bytes(header.DataLength),
+                                    .Timestamp        = header.RxTimestamp,
+                                    .FilterMatchIndex = header.FilterIndex,
+                                };
+                                callback(hcan, &can_header, data);
+                            }
+                        },
+                        map->callbacks[i]);
+            }
+    }
+}
+
+void FDCAN_Fifo0ReceiveCallback(FDCAN_HandleTypeDef* hcan, uint32_t)
+{
+    FDCAN_RxDispatch(hcan, FDCAN_RX_FIFO0);
+}
+
+void FDCAN_Fifo1ReceiveCallback(FDCAN_HandleTypeDef* hcan, uint32_t)
+{
+    FDCAN_RxDispatch(hcan, FDCAN_RX_FIFO1);
+}
+
+#    if FDCAN_ENABLE_SOFT_TX_QUEUE
+void FDCAN_TxSendMsgFromSoftQueue(FDCAN_HandleTypeDef* hcan)
+{
+    auto* map = get_map(hcan);
+    if (map == nullptr)
+    {
+        // TODO: fixbug 当表未注册使可能产生 UB
+        return;
+    }
+    while (HAL_FDCAN_GetTxFifoFreeLevel(hcan) > 0 && !map->buffer.empty())
+    {
+        const auto msg = map->buffer.pop();
+        if (HAL_FDCAN_AddMessageToTxFifoQ(hcan, &msg->header, msg->data) != HAL_OK)
+        {
+            // TODO: preserve the queued frame and report a recoverable HAL failure.
+            Error_Handler();
+            return;
+        }
+    }
+}
+#    endif
+
+void FDCAN_InitMainCallback(FDCAN_HandleTypeDef* hcan)
+{
+    assert(hcan != nullptr);
+    if (HAL_FDCAN_RegisterRxFifo0Callback(hcan, FDCAN_Fifo0ReceiveCallback) != HAL_OK ||
+        HAL_FDCAN_RegisterRxFifo1Callback(hcan, FDCAN_Fifo1ReceiveCallback) != HAL_OK)
+        Error_Handler();
+#    if FDCAN_ENABLE_SOFT_TX_QUEUE
+    if (HAL_FDCAN_RegisterCallback(hcan,
+                                   HAL_FDCAN_TX_FIFO_EMPTY_CB_ID,
+                                   FDCAN_TxSendMsgFromSoftQueue) != HAL_OK)
+        Error_Handler();
+#    endif
+}
+
+/**
+ * 注册 CAN 主回调函数，兼容 bxCAN
+ * @param hcan can handle
+ */
+void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
+{
+    FDCAN_InitMainCallback(hcan);
+}
+
+uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
+                           const FDCAN_TxHeaderTypeDef* header,
+                           const uint8_t                data[])
+{
+    if (hcan == nullptr || header == nullptr || data == nullptr)
+        return CAN_SEND_FAILED;
+
+    ISRGuard guard;
+    if (HAL_FDCAN_GetTxFifoFreeLevel(hcan) > 0)
+    {
+        if (HAL_FDCAN_AddMessageToTxFifoQ(hcan, header, data) != HAL_OK)
+        {
+            // TODO: return the HAL failure without entering the global error handler.
+            Error_Handler();
+            return CAN_SEND_FAILED;
+        }
+#    if FDCAN_ENABLE_SOFT_TX_QUEUE
+        FDCAN_TxSendMsgFromSoftQueue(hcan);
+#    endif
+        return 0;
+    }
+#    if FDCAN_ENABLE_SOFT_TX_QUEUE
+    auto* map = get_map(hcan);
+    if (map == nullptr)
+    {
+        // TODO: register the handle before queueing, and support a richer failure result.
+        return CAN_SEND_FAILED;
+    }
+    const uint32_t bytes = FDCAN_DLC_Bytes(header->DataLength);
+    if (map->buffer.push(
+                [&](CAN_MessageDef& msg)
+                {
+                    msg.header = *header;
+                    memcpy(msg.data, data, bytes);
+                    memset(msg.data + bytes, 0, 64 - bytes);
+                }))
+        return 0;
+#    endif
+    return CAN_SEND_FAILED;
+}
+
+uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
+                         const CAN_TxHeaderTypeDef* header,
+                         const uint8_t              data[])
+{
+    if (hcan == nullptr || header == nullptr || data == nullptr)
+        return CAN_SEND_FAILED;
+
+    if (hcan->Init.FrameFormat != FDCAN_FRAME_CLASSIC)
+        return CAN_SEND_FAILED;
+
+    const bool isExtId = header->IDE == CAN_ID_EXT;
+
+    const FDCAN_TxHeaderTypeDef fdcan_header{
+        .Identifier    = isExtId ? header->ExtId : header->StdId,
+        .IdType        = isExtId ? FDCAN_EXTENDED_ID : FDCAN_STANDARD_ID,
+        .TxFrameType   = (header->RTR == CAN_RTR_DATA) ? FDCAN_DATA_FRAME : FDCAN_REMOTE_FRAME,
+        .DataLength    = can_dlc_to_fdcan_dlc(header->DLC),
+        .BitRateSwitch = FDCAN_BRS_OFF,
+        .FDFormat      = FDCAN_CLASSIC_CAN
+    };
+
+    return FDCAN_SendMessage(hcan, &fdcan_header, data);
+}
+
+void FDCAN_Start(FDCAN_HandleTypeDef* hcan, uint32_t ActiveITs)
+{
+    if (HAL_FDCAN_Start(hcan) != HAL_OK ||
+        HAL_FDCAN_ActivateNotification(hcan, ActiveITs | FDCAN_IT_TX_FIFO_EMPTY, 0) != HAL_OK)
+        Error_Handler();
+}
+
+void CAN_Start(CAN_HandleTypeDef* hcan, uint32_t ActiveITs)
+{
+    // 使用 CAN_Start 必须保证 FDCAN 配置为 classic 模式
+    assert(hcan != nullptr);
+    assert(hcan->Init.FrameFormat == FDCAN_FRAME_CLASSIC);
+    FDCAN_Start(hcan, ActiveITs);
+}
+
+void RegisterCallback(FDCAN_HandleTypeDef* hcan, FifoReceiveCallback callback)
+{
+    auto* map = get_map(hcan);
+    if (map == nullptr)
+    {
+        if (map_size >= CAN_NUM)
+        {
+            Error_Handler();
+            return;
+        }
+        maps[map_size].hcan = hcan;
+        map                 = &maps[map_size++];
+    }
+    if (map->callback_count >= CAN_MAX_CALLBACK_NUM)
+    {
+        Error_Handler();
+        return;
+    }
+    map->callbacks[map->callback_count++] = callback;
+}
+
+void FDCAN_RegisterCallback(FDCAN_HandleTypeDef* hcan, FDCAN_FifoReceiveCallback_t callback)
+{
+    assert(hcan != nullptr && callback != nullptr);
+    RegisterCallback(hcan, callback);
+}
+
+void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, CAN_FifoReceiveCallback_t callback)
+{
+    assert(hcan != nullptr && callback != nullptr);
+    assert(hcan->Init.FrameFormat == FDCAN_FRAME_CLASSIC);
+    RegisterCallback(hcan, callback);
+}
+
+#else
 /**
  * 储存于软件缓冲区的 CAN 消息类型
  *
@@ -58,7 +371,7 @@ struct CAN_CallbackMap
     uint32_t                  callback_count{ 0 };
     // 使用环形缓冲区实现发送队列，队列长度 CAN_TX_QUEUE_SIZE，Overwrite=true
     // 当队列满时会丢弃最早的帧
-    libs::RingBuffer<CAN_MessageDef, CAN_TX_QUEUE_SIZE, true> buffer;
+    libs::RingBuffer<CAN_MessageDef, CAN_TX_QUEUE_SIZE + 1, true> buffer;
 };
 
 // 根据 CAN 实例的数量定义回调表
@@ -193,21 +506,15 @@ void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, const CAN_FifoReceiveCallback
 //         callbacks[filter_match_index] = NULL;
 // }
 
-/**
- * CAN Fifo0 接收处理函数
- *
- * 本函数将会根据 hcan 和 rx_header 内部的 filter_id 来调用对应的回调函数
- * @param hcan can handle
- */
-void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
+void CAN_RxDispatch(CAN_HandleTypeDef* hcan, uint32_t fifo)
 {
     // 采用 while 循环来确保清空队列
-    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0)
+    while (HAL_CAN_GetRxFifoFillLevel(hcan, fifo) > 0)
     {
         CAN_RxHeaderTypeDef header;
         uint8_t             data[8];
         // 从 FIFO 中获取一帧
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &header, data) != HAL_OK)
+        if (HAL_CAN_GetRxMessage(hcan, fifo, &header, data) != HAL_OK)
         {
             Error_Handler();
             return;
@@ -222,6 +529,17 @@ void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
                 map->callbacks[i](hcan, &header, data);
     }
 }
+
+/**
+ * CAN Fifo0 接收处理函数
+ *
+ * 本函数将会根据 hcan 和 rx_header 内部的 filter_id 来调用对应的回调函数
+ * @param hcan can handle
+ */
+void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
+{
+    CAN_RxDispatch(hcan, CAN_RX_FIFO0);
+}
 /**
  * CAN Fifo1 接收处理函数
  *
@@ -230,20 +548,7 @@ void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
  */
 void CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
 {
-    while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0)
-    {
-        CAN_RxHeaderTypeDef header;
-        uint8_t             data[8];
-        if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO1, &header, data) != HAL_OK)
-        {
-            Error_Handler();
-            return;
-        }
-        const CAN_CallbackMap* map = get_map(hcan);
-        if (map != nullptr)
-            for (size_t i = 0; i < map->callback_count; i++)
-                map->callbacks[i](hcan, &header, data);
-    }
+    CAN_RxDispatch(hcan, CAN_RX_FIFO1);
 }
 
 /**
@@ -276,10 +581,21 @@ void CAN_TxMailboxCpltCallback(CAN_HandleTypeDef* hcan)
 void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
 {
     assert(hcan != nullptr);
-
-    HAL_CAN_RegisterCallback(hcan, HAL_CAN_RX_FIFO0_MSG_PENDING_CB_ID, CAN_Fifo0ReceiveCallback);
-    HAL_CAN_RegisterCallback(hcan, HAL_CAN_RX_FIFO1_MSG_PENDING_CB_ID, CAN_Fifo1ReceiveCallback);
-    HAL_CAN_RegisterCallback(hcan, HAL_CAN_TX_MAILBOX0_COMPLETE_CB_ID, CAN_TxMailboxCpltCallback);
-    HAL_CAN_RegisterCallback(hcan, HAL_CAN_TX_MAILBOX1_COMPLETE_CB_ID, CAN_TxMailboxCpltCallback);
-    HAL_CAN_RegisterCallback(hcan, HAL_CAN_TX_MAILBOX2_COMPLETE_CB_ID, CAN_TxMailboxCpltCallback);
+    if (HAL_CAN_RegisterCallback(hcan,
+                                 HAL_CAN_RX_FIFO0_MSG_PENDING_CB_ID,
+                                 CAN_Fifo0ReceiveCallback) != HAL_OK ||
+        HAL_CAN_RegisterCallback(hcan,
+                                 HAL_CAN_RX_FIFO1_MSG_PENDING_CB_ID,
+                                 CAN_Fifo1ReceiveCallback) != HAL_OK ||
+        HAL_CAN_RegisterCallback(hcan,
+                                 HAL_CAN_TX_MAILBOX0_COMPLETE_CB_ID,
+                                 CAN_TxMailboxCpltCallback) != HAL_OK ||
+        HAL_CAN_RegisterCallback(hcan,
+                                 HAL_CAN_TX_MAILBOX1_COMPLETE_CB_ID,
+                                 CAN_TxMailboxCpltCallback) != HAL_OK ||
+        HAL_CAN_RegisterCallback(hcan,
+                                 HAL_CAN_TX_MAILBOX2_COMPLETE_CB_ID,
+                                 CAN_TxMailboxCpltCallback) != HAL_OK)
+        Error_Handler();
 }
+#endif
