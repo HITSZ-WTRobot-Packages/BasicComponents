@@ -35,6 +35,8 @@
  * FDCAN 版本
  */
 #if CAN_DRIVER_FDCAN_ENABLED
+namespace
+{
 struct CAN_MessageDef
 {
     FDCAN_TxHeaderTypeDef header;
@@ -69,12 +71,57 @@ CAN_CallbackMap* get_map(const FDCAN_HandleTypeDef* hcan)
 
 constexpr uint32_t FDCAN_DLC_Bytes(const uint32_t dlc)
 {
-    if (dlc >= 16)
-        return -1;
-    constexpr std::array<uint32_t, 16> fdcan_dlc_map{ 0, 1,  2,  3,  4,  5,  6,  7,
-                                                      8, 12, 16, 20, 24, 32, 48, 64 };
-    return fdcan_dlc_map[dlc];
+    switch (dlc)
+    {
+    case FDCAN_DLC_BYTES_0:
+        return 0;
+    case FDCAN_DLC_BYTES_1:
+        return 1;
+    case FDCAN_DLC_BYTES_2:
+        return 2;
+    case FDCAN_DLC_BYTES_3:
+        return 3;
+    case FDCAN_DLC_BYTES_4:
+        return 4;
+    case FDCAN_DLC_BYTES_5:
+        return 5;
+    case FDCAN_DLC_BYTES_6:
+        return 6;
+    case FDCAN_DLC_BYTES_7:
+        return 7;
+    case FDCAN_DLC_BYTES_8:
+        return 8;
+    case FDCAN_DLC_BYTES_12:
+        return 12;
+    case FDCAN_DLC_BYTES_16:
+        return 16;
+    case FDCAN_DLC_BYTES_20:
+        return 20;
+    case FDCAN_DLC_BYTES_24:
+        return 24;
+    case FDCAN_DLC_BYTES_32:
+        return 32;
+    case FDCAN_DLC_BYTES_48:
+        return 48;
+    case FDCAN_DLC_BYTES_64:
+        return 64;
+    default:
+        return 0;
+    }
 }
+
+constexpr uint32_t can_dlc_to_fdcan_dlc(const uint32_t dlc)
+{
+    constexpr std::array<uint32_t, 9> can_dlcs{ FDCAN_DLC_BYTES_0, FDCAN_DLC_BYTES_1,
+                                                FDCAN_DLC_BYTES_2, FDCAN_DLC_BYTES_3,
+                                                FDCAN_DLC_BYTES_4, FDCAN_DLC_BYTES_5,
+                                                FDCAN_DLC_BYTES_6, FDCAN_DLC_BYTES_7,
+                                                FDCAN_DLC_BYTES_8 };
+    if (dlc > 8)
+        return FDCAN_DLC_BYTES_0;
+    return can_dlcs[dlc];
+}
+} // namespace
 
 void FDCAN_RxDispatch(FDCAN_HandleTypeDef* hcan, const uint32_t fifo)
 {
@@ -115,7 +162,9 @@ void FDCAN_RxDispatch(FDCAN_HandleTypeDef* hcan, const uint32_t fifo)
                                     .IDE   = isExtId ? CAN_ID_EXT : CAN_ID_STD,
                                     .RTR   = header.RxFrameType == FDCAN_DATA_FRAME ? CAN_RTR_DATA
                                                                                     : CAN_RTR_REMOTE,
-                                    .DLC   = FDCAN_DLC_Bytes(header.DataLength)
+                                    .DLC   = FDCAN_DLC_Bytes(header.DataLength),
+                                    .Timestamp        = header.RxTimestamp,
+                                    .FilterMatchIndex = header.FilterIndex,
                                 };
                                 callback(hcan, &can_header, data);
                             }
@@ -209,13 +258,14 @@ uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
         return CAN_SEND_FAILED;
     }
     const uint32_t bytes = FDCAN_DLC_Bytes(header->DataLength);
-    map->buffer.push(
-            [&](CAN_MessageDef& msg)
-            {
-                msg.header = *header;
-                memcpy(msg.data, data, bytes);
-                memset(msg.data + bytes, 0, 64 - bytes);
-            });
+    if (map->buffer.push(
+                [&](CAN_MessageDef& msg)
+                {
+                    msg.header = *header;
+                    memcpy(msg.data, data, bytes);
+                    memset(msg.data + bytes, 0, 64 - bytes);
+                }))
+        return 0;
 #    endif
     return CAN_SEND_FAILED;
 }
@@ -236,7 +286,7 @@ uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
         .Identifier    = isExtId ? header->ExtId : header->StdId,
         .IdType        = isExtId ? FDCAN_EXTENDED_ID : FDCAN_STANDARD_ID,
         .TxFrameType   = (header->RTR == CAN_RTR_DATA) ? FDCAN_DATA_FRAME : FDCAN_REMOTE_FRAME,
-        .DataLength    = std::min<uint32_t>(header->DLC, 8u),
+        .DataLength    = can_dlc_to_fdcan_dlc(header->DLC),
         .BitRateSwitch = FDCAN_BRS_OFF,
         .FDFormat      = FDCAN_CLASSIC_CAN
     };
