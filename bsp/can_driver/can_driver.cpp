@@ -387,6 +387,8 @@ void CAN_Start(CAN_HandleTypeDef* hcan, uint32_t ActiveITs)
     FDCAN_Start(hcan, ActiveITs);
 }
 
+namespace
+{
 void RegisterCallback(FDCAN_HandleTypeDef* hcan, FifoReceiveCallback callback)
 {
     auto* map = get_map(hcan);
@@ -407,7 +409,7 @@ void RegisterCallback(FDCAN_HandleTypeDef* hcan, FifoReceiveCallback callback)
     }
     map->callbacks[map->callback_count++] = callback;
 }
-
+} // namespace
 void FDCAN_RegisterCallback(FDCAN_HandleTypeDef* hcan, FDCAN_FifoReceiveCallback_t callback)
 {
     assert(hcan != nullptr && callback != nullptr);
