@@ -103,7 +103,8 @@ CAN_CallbackMap* get_map(const FDCAN_HandleTypeDef* hcan)
  *
  * CAN-FD 的 DLC 编码 9 ~ 15 依次对应 12/16/20/24/32/48/64 字节，并非线性。
  * @param dlc FDCAN 帧的 DataLength 编码
- * @return 实际数据长度；编码非法（>= 16）时返回 (uint32_t)-1
+ * @return 实际数据长度；编码非法（> FDCAN_DLC_BYTES_64）时返回 0，
+ *         调用方需自行校验编码合法性
  */
 constexpr uint32_t FDCAN_DLC_Bytes(const uint32_t dlc)
 {
@@ -164,6 +165,8 @@ constexpr uint32_t can_dlc_to_fdcan_dlc(const uint32_t dlc)
  *
  * 循环取出指定 Rx FIFO 中的所有帧，并依次调用回调表中注册的每一个回调函数。
  * bxCAN 风格的回调只会收到 classic 帧：CAN-FD 帧无法用 CAN_RxHeaderTypeDef 表达。
+ * @note 转换为 bxCAN 帧头时，FilterMatchIndex 填入的是 FDCAN 滤波器元素索引，
+ *       与 bxCAN 的 FilterBank 编号不是同一套编号，按 bank 索引的调用方需注意。
  * @param hcan can handle
  * @param fifo FDCAN_RX_FIFO0 或 FDCAN_RX_FIFO1
  */
@@ -201,8 +204,10 @@ void FDCAN_RxDispatch(FDCAN_HandleTypeDef* hcan, const uint32_t fifo)
                                     return;
                                 const bool isExtId = header.IdType == FDCAN_EXTENDED_ID;
                                 const CAN_RxHeaderTypeDef can_header{
-                                    .StdId = header.Identifier,
-                                    .ExtId = header.Identifier,
+                                    // 与 bxCAN 一致，只填与 ID 类型对应的字段：
+                                    // 29 bit 扩展 ID 放入 StdId 会超出其 0~0x7FF 的合法范围
+                                    .StdId = isExtId ? 0U : header.Identifier,
+                                    .ExtId = isExtId ? header.Identifier : 0U,
                                     .IDE   = isExtId ? CAN_ID_EXT : CAN_ID_STD,
                                     .RTR   = header.RxFrameType == FDCAN_DATA_FRAME ? CAN_RTR_DATA
                                                                                     : CAN_RTR_REMOTE,
@@ -299,6 +304,8 @@ void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
  * @param header 发送帧头，包含 ID 类型、帧格式与 DataLength 编码
  * @param data 待发送数据，长度由 header->DataLength 决定
  * @note 线程安全：内部会短暂关闭中断
+ * @note DataLength 必须是合法编码（FDCAN_DLC_BYTES_0 ~ FDCAN_DLC_BYTES_64），
+ *       非法编码不会发出空帧，直接返回 CAN_SEND_FAILED
  * @note 硬件 Tx FIFO 已满且未启用软件发送队列时发送失败
  * @return 成功返回 0，失败返回 CAN_SEND_FAILED
  */
@@ -307,6 +314,11 @@ uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
                            const uint8_t                data[])
 {
     if (hcan == nullptr || header == nullptr || data == nullptr)
+        return CAN_SEND_FAILED;
+
+    // DataLength 为 4 bit 的 DLC 编码，合法取值恰为 FDCAN_DLC_BYTES_0 ~ FDCAN_DLC_BYTES_64。
+    // 非法编码会被 FDCAN_DLC_Bytes() 映射为 0，从而静默发出空帧，故在此直接拒绝。
+    if (header->DataLength > FDCAN_DLC_BYTES_64)
         return CAN_SEND_FAILED;
 
     ISRGuard guard;
@@ -319,6 +331,11 @@ uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
             return CAN_SEND_FAILED;
         }
 #    if FDCAN_ENABLE_SOFT_TX_QUEUE
+        // TODO(fix): 软件队列非空时仍走直发路径，会让本帧先于队列中更早提交的帧发出。
+        //            正式修复应先判断队列是否为空、非空则改为入队，由 Tx FIFO 空闲
+        //            中断统一搬运；在此之前先用断言暴露该顺序反转。
+        assert((get_map(hcan) == nullptr || get_map(hcan)->buffer.empty()) &&
+               "FDCAN soft Tx queue not empty: direct send reorders frames");
         FDCAN_TxSendMsgFromSoftQueue(hcan);
 #    endif
         return 0;
@@ -360,6 +377,11 @@ uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
     if (hcan->Init.FrameFormat != FDCAN_FRAME_CLASSIC)
         return CAN_SEND_FAILED;
 
+    // classic 帧只有 0~8 字节，超出范围的 DLC 会被 can_dlc_to_fdcan_dlc() 映射成 0，
+    // 不能静默当作空帧发出。
+    if (header->DLC > 8)
+        return CAN_SEND_FAILED;
+
     const bool isExtId = header->IDE == CAN_ID_EXT;
 
     const FDCAN_TxHeaderTypeDef fdcan_header{
@@ -377,11 +399,17 @@ uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
 /**
  * 将 bxCAN 风格的过滤器配置转换为 FDCAN 配置。
  *
- * 32 位 bxCAN 过滤器由 FR1/FR2 两个字组成，每个字均由
- * FilterIdHigh/FilterMaskIdHigh 作为高 16 位、FilterIdLow/FilterMaskIdLow
- * 作为低 16 位拼接而成，因此 ID 与掩码无论落在高半字还是低半字都按
- * bxCAN 字布局解码，不会丢弃低半字。
+ * 只支持 32 位 scale（ID 掩码 / ID 列表）。32 位 bxCAN 过滤器由 FR1/FR2 两个字组成，
+ * 每个字均由 FilterIdHigh/FilterMaskIdHigh 作为高 16 位、FilterIdLow/FilterMaskIdLow
+ * 作为低 16 位拼接而成，因此 ID 与掩码无论落在高半字还是低半字都按 bxCAN 字布局解码，
+ * 不会丢弃低半字。
  *
+ * 16 位 scale 无法用单个 FDCAN 滤波器元素无损表达（见实现内注释），
+ * 统一返回 HAL_ERROR。
+ *
+ * @note 需要先在 CubeMX 中为该 ID 类型分配滤波器元素（FDCAN 的 Std Filters
+ *       Nbr / Ext Filters Nbr）；分配数量为 0 时返回 HAL_ERROR，
+ *       详见下方 filter_capacity 处的说明。
  * @return 配置结果：成功返回 HAL_OK，参数或配置不受支持时返回 HAL_ERROR
  */
 HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*       hcan,
@@ -391,6 +419,14 @@ HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*       hcan,
         return HAL_ERROR;
 
     FDCAN_FilterTypeDef fdcan_filter{};
+    // 直接复用 bxCAN 的 FilterBank 作为 FDCAN 滤波器元素索引
+    // TODO(fix): FilterBank 是 bxCAN 的 bank 编号（单 CAN 0~13，双 CAN 0~27，且从站
+    //   从 SlaveStartFilterBank 起算），与 FDCAN 每个实例各自独立的滤波器元素索引
+    //   不是同一套编号。当前既未做上界校验，也未做 bank 重映射：索引越界时
+    //   HAL_FDCAN_ConfigFilter 只会写入 ExtendedFilterSA/StandardFilterSA + index*size，
+    //   踩到 Rx FIFO0 等 message RAM（本工程 USE_FULL_ASSERT 关闭，assert_param 为空，
+    //   没有任何运行时保护）。修复时应校验索引小于对应类型的滤波器元素数量，并按
+    //   实例重映射 bank。
     fdcan_filter.FilterIndex = filterConfig->FilterBank;
 
     if (filterConfig->FilterActivation == CAN_FILTER_DISABLE)
@@ -401,17 +437,15 @@ HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*       hcan,
     }
     else if (filterConfig->FilterScale == CAN_FILTERSCALE_16BIT)
     {
-        // FDCAN_FILTER_DUAL 只能表达两个 ID 列表，不能表达两个 ID-mask。
-        if (filterConfig->FilterMode != CAN_FILTERMODE_IDLIST)
-            return HAL_ERROR;
-
-        fdcan_filter.IdType       = FDCAN_STANDARD_ID;
-        fdcan_filter.FilterType   = FDCAN_FILTER_DUAL;
-        fdcan_filter.FilterID1    = filterConfig->FilterIdHigh >> 5;
-        fdcan_filter.FilterID2    = filterConfig->FilterIdLow >> 5;
-        fdcan_filter.FilterConfig = filterConfig->FilterFIFOAssignment == CAN_FILTER_FIFO1
-                                            ? FDCAN_FILTER_TO_RXFIFO1
-                                            : FDCAN_FILTER_TO_RXFIFO0;
+        // bxCAN 的 16 位 scale 在一个 bank 内放两组 16 位值对，HAL_CAN_ConfigFilter 的
+        // 写入方式为
+        //   FR1 = (FilterMaskIdLow  << 16) | FilterIdLow
+        //   FR2 = (FilterMaskIdHigh << 16) | FilterIdHigh
+        // 即 ID 列表模式下这四个字段都是待匹配 ID，掩码模式下是两组 ID+掩码。
+        // 而 FDCAN 单个滤波器元素最多只放两个值（DUAL 两个 ID，MASK 一个 ID 加一个掩码），
+        // 无法无损表达：只取其中两个会静默丢弃另外两个。这里直接拒绝，
+        // 避免上层以为过滤器已按预期生效。
+        return HAL_ERROR;
     }
     else if (filterConfig->FilterScale == CAN_FILTERSCALE_32BIT)
     {
@@ -448,6 +482,15 @@ HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*       hcan,
     {
         return HAL_ERROR;
     }
+
+    // CubeMX 未给该 ID 类型分配滤波器元素时 RXGFC.LSS/LSE 为 0，硬件根本不评估任何
+    // 滤波器，而 HAL_FDCAN_ConfigFilter 仍会把配置写进 message RAM 并返回 HAL_OK，
+    // 表现为滤波器静默失效。此处直接拒绝，避免上层误以为过滤已生效。
+    const uint32_t filter_capacity = fdcan_filter.IdType == FDCAN_EXTENDED_ID
+                                             ? hcan->Init.ExtFiltersNbr
+                                             : hcan->Init.StdFiltersNbr;
+    if (filter_capacity == 0)
+        return HAL_ERROR;
 
     return HAL_FDCAN_ConfigFilter(hcan, &fdcan_filter);
 }

@@ -112,6 +112,7 @@ typedef void (*CAN_FifoReceiveCallback_t)(const CAN_HandleTypeDef*   hcan,
  * @param header 发送帧头，包含 ID 类型、数据/远程帧标志与 DLC
  * @param data 待发送数据，长度由 header->DLC 决定（不超过 8 字节）
  * @note 线程安全：内部会短暂关闭中断
+ * @note DLC 大于 8 时不会发出空帧，直接返回 CAN_SEND_FAILED
  * @return 成功时返回发送使用的 mailbox 编号（FDCAN 兼容接口返回 0），
  *         失败时返回 CAN_SEND_FAILED
  */
@@ -131,7 +132,9 @@ void CAN_InitMainCallback(CAN_HandleTypeDef* hcan);
  * 启动 CAN 并开启中断
  * @param hcan can handle
  * @param ActiveITs 需要额外开启的中断，如
- *        CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING
+ *        CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING。
+ *        bxCAN 后端使用 HAL 原生宏；FDCAN 后端使用 can_hal_def.h 提供的兼容
+ *        别名（取值等于对应的 FDCAN_IT_*），直接传 FDCAN_IT_* 亦可。
  * @note 驱动会额外开启发送完成中断，以驱动软件发送队列
  */
 void CAN_Start(CAN_HandleTypeDef* hcan, uint32_t ActiveITs);
@@ -167,6 +170,8 @@ typedef void (*FDCAN_FifoReceiveCallback_t)(const FDCAN_HandleTypeDef*   hcan,
  * @param header 发送帧头，包含 ID 类型、帧格式与 DataLength 编码
  * @param data 待发送数据，长度由 header->DataLength 决定
  * @note 线程安全：内部会短暂关闭中断
+ * @note DataLength 必须是合法编码（FDCAN_DLC_BYTES_0 ~ FDCAN_DLC_BYTES_64），
+ *       非法编码不会发出空帧，直接返回 CAN_SEND_FAILED
  * @return 成功返回 0，失败返回 CAN_SEND_FAILED
  */
 uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
@@ -203,7 +208,14 @@ void FDCAN_RegisterCallback(FDCAN_HandleTypeDef* hcan, FDCAN_FifoReceiveCallback
 /**
  * bxCAN 过滤器配置兼容接口
  *
- * 将 bxCAN 风格的 CAN_FilterTypeDef 转换为 FDCAN 过滤器并写入。
+ * 将 bxCAN 风格的 CAN_FilterTypeDef 转换为 FDCAN 滤波器并写入。
+ * 支持 32 位 ID 掩码 / ID 列表（bxCAN 的 FR1/FR2 字布局，含只填单个半字的用法）。
+ * bxCAN 的 16 位 scale 在一个 bank 内放两组 16 位值对，单个 FDCAN 滤波器元素
+ * 表达不了，一律返回 HAL_ERROR（避免静默丢弃部分 ID）。
+ *
+ * @note 需要先在 CubeMX 中为该 ID 类型分配滤波器元素（FDCAN 的
+ *       Std Filters Nbr / Ext Filters Nbr）。分配数量为 0 时 HAL 仍会写入
+ *       message RAM 但硬件不评估滤波器，本接口会直接返回 HAL_ERROR。
  * @param hcan can handle
  * @param filterConfig bxCAN 风格过滤器配置
  * @return 配置结果，成功返回 HAL_OK

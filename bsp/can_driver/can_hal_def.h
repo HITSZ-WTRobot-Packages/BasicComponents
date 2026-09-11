@@ -67,7 +67,9 @@ typedef struct
     uint32_t Timestamp;        /*!< Timestamp captured at the start of reception.
                                    Range: 0 to 0xFFFF. */
     uint32_t FilterMatchIndex; /*!< Index of the matching acceptance filter.
-                                  Range: 0 to 0xFF. */
+                                  Range: 0 to 0xFF.
+                                  @note 在 FDCAN 后端下填入的是 FDCAN 滤波器元素索引，
+                                        与 bxCAN 的 FilterBank 编号不是同一套编号。 */
 } CAN_RxHeaderTypeDef;
 
 #define CAN_FILTERMODE_IDMASK (0x00000000U) /*!< Identifier mask mode. */
@@ -87,6 +89,17 @@ typedef struct
 
 #define CAN_RTR_DATA   (0x00000000U) /*!< Data frame. */
 #define CAN_RTR_REMOTE (0x00000002U) /*!< Remote frame. */
+
+/*! bxCAN 中断标志兼容别名。取值即对应的 FDCAN_IT_*，因此可以原样传给
+    FDCAN_Start()，用 bxCAN 接口编写的上层无需改动中断参数。
+    注意 bxCAN 与 FDCAN 的同名中断位并非一一对应（例如 bxCAN 的
+    CAN_IT_RX_FIFO0_MSG_PENDING 与 CAN_IT_RX_FIFO0_FULL 都是 0x2，
+    而 FDCAN 的分别是 0x1 和 0x2），必须通过这些别名而非数值使用。 */
+#define CAN_IT_RX_FIFO0_MSG_PENDING (FDCAN_IT_RX_FIFO0_NEW_MESSAGE)
+#define CAN_IT_RX_FIFO1_MSG_PENDING (FDCAN_IT_RX_FIFO1_NEW_MESSAGE)
+#define CAN_IT_RX_FIFO0_FULL        (FDCAN_IT_RX_FIFO0_FULL)
+#define CAN_IT_RX_FIFO1_FULL        (FDCAN_IT_RX_FIFO1_FULL)
+#define CAN_IT_TX_MAILBOX_EMPTY     (FDCAN_IT_TX_FIFO_EMPTY)
 
 #ifdef __cplusplus
 }
