@@ -172,6 +172,8 @@ typedef void (*FDCAN_FifoReceiveCallback_t)(const FDCAN_HandleTypeDef*   hcan,
  * @note 线程安全：内部会短暂关闭中断
  * @note DataLength 必须是合法编码（FDCAN_DLC_BYTES_0 ~ FDCAN_DLC_BYTES_64），
  *       非法编码不会发出空帧，直接返回 CAN_SEND_FAILED
+ * @note 启用软件发送队列（FDCAN_TX_QUEUE_SIZE > 0）时按调用顺序发送：
+ *       队列未清空之前的新帧一律入队，不会插到更早提交的帧之前
  * @return 成功返回 0，失败返回 CAN_SEND_FAILED
  */
 uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,

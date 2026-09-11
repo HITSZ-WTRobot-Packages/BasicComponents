@@ -246,19 +246,21 @@ void FDCAN_Fifo1ReceiveCallback(FDCAN_HandleTypeDef* hcan, uint32_t)
  * 将软件发送队列中的消息搬入 FDCAN 硬件 Tx FIFO
  *
  * 在 Tx FIFO 空闲中断或直接发送之后调用，直到硬件 FIFO 占满或软件队列清空为止。
+ * 队列中的帧按提交顺序搬运，因此该函数是发送顺序的唯一出口。
+ * @note 调用方需保证与入队互斥：任务上下文由 ISRGuard 保护，中断上下文里
+ *       同一句柄的 Tx FIFO 空闲回调不会被自身重入
  * @param hcan can handle
  */
 void FDCAN_TxSendMsgFromSoftQueue(FDCAN_HandleTypeDef* hcan)
 {
     auto* map = get_map(hcan);
     if (map == nullptr)
-    {
-        // TODO: fixbug 当表未注册使可能产生 UB
         return;
-    }
     while (HAL_FDCAN_GetTxFifoFreeLevel(hcan) > 0 && !map->buffer.empty())
     {
-        const auto msg = map->buffer.pop();
+        const auto* msg = map->buffer.pop();
+        if (msg == nullptr)
+            return;
         if (HAL_FDCAN_AddMessageToTxFifoQ(hcan, &msg->header, msg->data) != HAL_OK)
         {
             // TODO: preserve the queued frame and report a recoverable HAL failure.
@@ -306,6 +308,8 @@ void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
  * @note 线程安全：内部会短暂关闭中断
  * @note DataLength 必须是合法编码（FDCAN_DLC_BYTES_0 ~ FDCAN_DLC_BYTES_64），
  *       非法编码不会发出空帧，直接返回 CAN_SEND_FAILED
+ * @note 启用软件发送队列（FDCAN_TX_QUEUE_SIZE > 0）时，本函数按调用顺序提交：
+ *       队列非空则先入队，由队列统一按序写入硬件 Tx FIFO，不会插队
  * @note 硬件 Tx FIFO 已满且未启用软件发送队列时发送失败
  * @return 成功返回 0，失败返回 CAN_SEND_FAILED
  */
@@ -322,42 +326,48 @@ uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
         return CAN_SEND_FAILED;
 
     ISRGuard guard;
-    if (HAL_FDCAN_GetTxFifoFreeLevel(hcan) > 0)
+
+#    if FDCAN_ENABLE_SOFT_TX_QUEUE
+    // 发送顺序由软件队列保证：队列非空时新帧必须排队，直接写硬件 Tx FIFO
+    // 会越过队列中更早提交的帧；硬件 FIFO 已满时同样入队，由 Tx FIFO 空闲
+    // 中断（或下方顺带搬运）按序写入硬件。
+    auto* const map             = get_map(hcan);
+    const bool  queue_not_empty = map != nullptr && !map->buffer.empty();
+
+    if (queue_not_empty || HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0)
     {
-        if (HAL_FDCAN_AddMessageToTxFifoQ(hcan, header, data) != HAL_OK)
+        if (map == nullptr)
         {
-            // TODO: return the HAL failure without entering the global error handler.
-            Error_Handler();
+            // 未登记回调表即没有可用队列
+            // TODO: register the handle before queueing, and support a richer failure result.
             return CAN_SEND_FAILED;
         }
-#    if FDCAN_ENABLE_SOFT_TX_QUEUE
-        // TODO(fix): 软件队列非空时仍走直发路径，会让本帧先于队列中更早提交的帧发出。
-        //            正式修复应先判断队列是否为空、非空则改为入队，由 Tx FIFO 空闲
-        //            中断统一搬运；在此之前先用断言暴露该顺序反转。
-        assert((get_map(hcan) == nullptr || get_map(hcan)->buffer.empty()) &&
-               "FDCAN soft Tx queue not empty: direct send reorders frames");
+        const uint32_t bytes = FDCAN_DLC_Bytes(header->DataLength);
+        if (!map->buffer.push(
+                    [&](CAN_MessageDef& msg)
+                    {
+                        msg.header = *header;
+                        memcpy(msg.data, data, bytes);
+                        memset(msg.data + bytes, 0, 64 - bytes);
+                    }))
+            return CAN_SEND_FAILED;
+        // 硬件 FIFO 可能仍有空位（队列非空而 FIFO 未满），顺带搬运一次，
+        // 避免只能等到硬件 FIFO 完全排空才由中断搬运
         FDCAN_TxSendMsgFromSoftQueue(hcan);
-#    endif
         return 0;
     }
-#    if FDCAN_ENABLE_SOFT_TX_QUEUE
-    auto* map = get_map(hcan);
-    if (map == nullptr)
+#    else
+    if (HAL_FDCAN_GetTxFifoFreeLevel(hcan) == 0)
+        return CAN_SEND_FAILED;
+#    endif
+
+    if (HAL_FDCAN_AddMessageToTxFifoQ(hcan, header, data) != HAL_OK)
     {
-        // TODO: register the handle before queueing, and support a richer failure result.
+        // TODO: return the HAL failure without entering the global error handler.
+        Error_Handler();
         return CAN_SEND_FAILED;
     }
-    const uint32_t bytes = FDCAN_DLC_Bytes(header->DataLength);
-    if (map->buffer.push(
-                [&](CAN_MessageDef& msg)
-                {
-                    msg.header = *header;
-                    memcpy(msg.data, data, bytes);
-                    memset(msg.data + bytes, 0, 64 - bytes);
-                }))
-        return 0;
-#    endif
-    return CAN_SEND_FAILED;
+    return 0;
 }
 
 /**
