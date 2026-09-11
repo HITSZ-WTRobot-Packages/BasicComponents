@@ -12,6 +12,8 @@
  * 由于 HAL 对同一事件只允许注册一个回调函数，接收方向统一由主回调进入驱动内部的
  * 回调表，再分发给业务模块注册的多个回调函数（见 CAN_RegisterCallback）。
  *
+ * TODO: 统一化 FDCAN 与 bxCAN 的接口，避免 bxCAN 类 API 与 FDCAN 类 API 互转造成的性能损失
+ *
  * --------------------------------------------------------------------------
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -222,6 +224,6 @@ void FDCAN_RegisterCallback(FDCAN_HandleTypeDef* hcan, FDCAN_FifoReceiveCallback
  * @param filterConfig bxCAN 风格过滤器配置
  * @return 配置结果，成功返回 HAL_OK
  */
-HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*        hcan,
+HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*       hcan,
                                        const CAN_FilterTypeDef* filterConfig);
 #endif
