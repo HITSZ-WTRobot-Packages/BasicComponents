@@ -37,30 +37,59 @@
 #if CAN_DRIVER_FDCAN_ENABLED
 namespace
 {
+/**
+ * 储存于软件发送队列的 FDCAN 消息类型
+ *
+ * 包括 TxHeader 以及至多 64 bytes（CAN-FD 单帧最大负载）的数据
+ */
 struct CAN_MessageDef
 {
     FDCAN_TxHeaderTypeDef header;
     uint8_t               data[64];
 };
 
+/**
+ * 回调表中保存的接收回调
+ *
+ * 同时兼容 FDCAN 原生回调与 bxCAN 兼容回调：分发时按实际类型决定是直接
+ * 调用，还是先把 FDCAN 帧头转换为 CAN_RxHeaderTypeDef 后再调用。
+ */
 using FifoReceiveCallback = std::variant<FDCAN_FifoReceiveCallback_t, CAN_FifoReceiveCallback_t>;
 
+/**
+ * CAN 回调函数表（FDCAN 后端）
+ *
+ * @note 由于 HAL 只允许将一个函数作为回调函数，如果想在一条总线上处理不同种类
+ *       的信息（有多个不同的回调函数），就必须要通过一个主回调函数进行分发
+ *
+ * @note FDCAN 硬件 Tx FIFO 深度有限，但是在很短的时间内可能连续发送多条消息，
+ *       故可选用软件缓冲区来临时储存溢出的消息（见 FDCAN_TX_QUEUE_SIZE）
+ */
 struct CAN_CallbackMap
 {
-    FDCAN_HandleTypeDef* hcan{ nullptr };
+    FDCAN_HandleTypeDef* hcan{ nullptr }; ///< 该表对应的 CAN 句柄
 
-    FifoReceiveCallback callbacks[CAN_MAX_CALLBACK_NUM]{};
+    FifoReceiveCallback callbacks[CAN_MAX_CALLBACK_NUM]{}; ///< 已注册的接收回调
 
-    uint32_t callback_count{ 0 };
+    uint32_t callback_count{ 0 }; ///< 已注册的接收回调数量
 
 #    if FDCAN_ENABLE_SOFT_TX_QUEUE
+    // 使用环形缓冲区实现发送队列，队列长度 FDCAN_TX_QUEUE_SIZE，Overwrite=true
+    // 当队列满时会丢弃最早的帧
     libs::RingBuffer<CAN_MessageDef, FDCAN_TX_QUEUE_SIZE + 1, true> buffer;
 #    endif
 };
 
+// 根据 CAN 实例的数量定义回调表
+// CAN 实例的数量取决于芯片型号，且无法在编译期预知，故在 .hpp 内通过宏定义
 CAN_CallbackMap maps[CAN_NUM];
-size_t          map_size = 0;
+size_t          map_size = 0; ///< 当前已登记的回调表数量
 
+/**
+ * 根据 can handle 指针查找对应的回调表
+ * @param hcan can handle
+ * @return 对应的回调表，未登记时返回 nullptr
+ */
 CAN_CallbackMap* get_map(const FDCAN_HandleTypeDef* hcan)
 {
     for (size_t i = 0; i < map_size; i++)
@@ -69,6 +98,13 @@ CAN_CallbackMap* get_map(const FDCAN_HandleTypeDef* hcan)
     return nullptr;
 }
 
+/**
+ * 将 FDCAN 的 DataLength 编码转换为实际数据长度（字节）
+ *
+ * CAN-FD 的 DLC 编码 9 ~ 15 依次对应 12/16/20/24/32/48/64 字节，并非线性。
+ * @param dlc FDCAN 帧的 DataLength 编码
+ * @return 实际数据长度；编码非法（>= 16）时返回 (uint32_t)-1
+ */
 constexpr uint32_t FDCAN_DLC_Bytes(const uint32_t dlc)
 {
     switch (dlc)
@@ -123,6 +159,14 @@ constexpr uint32_t can_dlc_to_fdcan_dlc(const uint32_t dlc)
 }
 } // namespace
 
+/**
+ * FDCAN 接收分发
+ *
+ * 循环取出指定 Rx FIFO 中的所有帧，并依次调用回调表中注册的每一个回调函数。
+ * bxCAN 风格的回调只会收到 classic 帧：CAN-FD 帧无法用 CAN_RxHeaderTypeDef 表达。
+ * @param hcan can handle
+ * @param fifo FDCAN_RX_FIFO0 或 FDCAN_RX_FIFO1
+ */
 void FDCAN_RxDispatch(FDCAN_HandleTypeDef* hcan, const uint32_t fifo)
 {
     while (HAL_FDCAN_GetRxFifoFillLevel(hcan, fifo) > 0)
@@ -174,17 +218,31 @@ void FDCAN_RxDispatch(FDCAN_HandleTypeDef* hcan, const uint32_t fifo)
     }
 }
 
+/**
+ * FDCAN Rx FIFO0 中断处理函数
+ * @param hcan can handle
+ */
 void FDCAN_Fifo0ReceiveCallback(FDCAN_HandleTypeDef* hcan, uint32_t)
 {
     FDCAN_RxDispatch(hcan, FDCAN_RX_FIFO0);
 }
 
+/**
+ * FDCAN Rx FIFO1 中断处理函数
+ * @param hcan can handle
+ */
 void FDCAN_Fifo1ReceiveCallback(FDCAN_HandleTypeDef* hcan, uint32_t)
 {
     FDCAN_RxDispatch(hcan, FDCAN_RX_FIFO1);
 }
 
 #    if FDCAN_ENABLE_SOFT_TX_QUEUE
+/**
+ * 将软件发送队列中的消息搬入 FDCAN 硬件 Tx FIFO
+ *
+ * 在 Tx FIFO 空闲中断或直接发送之后调用，直到硬件 FIFO 占满或软件队列清空为止。
+ * @param hcan can handle
+ */
 void FDCAN_TxSendMsgFromSoftQueue(FDCAN_HandleTypeDef* hcan)
 {
     auto* map = get_map(hcan);
@@ -206,6 +264,12 @@ void FDCAN_TxSendMsgFromSoftQueue(FDCAN_HandleTypeDef* hcan)
 }
 #    endif
 
+/**
+ * 注册 FDCAN 主回调函数
+ *
+ * 注册 Rx FIFO0/FIFO1 回调，并在启用软件发送队列时注册 Tx FIFO 空闲回调。
+ * @param hcan can handle
+ */
 void FDCAN_InitMainCallback(FDCAN_HandleTypeDef* hcan)
 {
     assert(hcan != nullptr);
@@ -221,7 +285,7 @@ void FDCAN_InitMainCallback(FDCAN_HandleTypeDef* hcan)
 }
 
 /**
- * 注册 CAN 主回调函数，兼容 bxCAN
+ * 注册 CAN 主回调函数，兼容 bxCAN 接口
  * @param hcan can handle
  */
 void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
@@ -229,6 +293,15 @@ void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
     FDCAN_InitMainCallback(hcan);
 }
 
+/**
+ * 发送一条 FDCAN 消息
+ * @param hcan can handle
+ * @param header 发送帧头，包含 ID 类型、帧格式与 DataLength 编码
+ * @param data 待发送数据，长度由 header->DataLength 决定
+ * @note 线程安全：内部会短暂关闭中断
+ * @note 硬件 Tx FIFO 已满且未启用软件发送队列时发送失败
+ * @return 成功返回 0，失败返回 CAN_SEND_FAILED
+ */
 uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
                            const FDCAN_TxHeaderTypeDef* header,
                            const uint8_t                data[])
@@ -270,6 +343,13 @@ uint32_t FDCAN_SendMessage(FDCAN_HandleTypeDef*         hcan,
     return CAN_SEND_FAILED;
 }
 
+/**
+ * 以 bxCAN 接口发送一条 classic CAN 帧（FDCAN 后端兼容实现）
+ * @param hcan can handle
+ * @param header 发送帧头，仅支持 classic 帧
+ * @param data 待发送数据，长度由 header->DLC 决定（不超过 8 字节）
+ * @return 同 FDCAN_SendMessage()
+ */
 uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
                          const CAN_TxHeaderTypeDef* header,
                          const uint8_t              data[])
@@ -372,6 +452,12 @@ HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*       hcan,
     return HAL_FDCAN_ConfigFilter(hcan, &fdcan_filter);
 }
 
+/**
+ * 启动 FDCAN 并开启中断
+ * @param hcan can handle
+ * @param ActiveITs 需要额外开启的中断，如 FDCAN_IT_RX_FIFO0_NEW_MESSAGE
+ * @note 驱动会强制叠加 FDCAN_IT_TX_FIFO_EMPTY，软件发送队列依赖该中断
+ */
 void FDCAN_Start(FDCAN_HandleTypeDef* hcan, uint32_t ActiveITs)
 {
     if (HAL_FDCAN_Start(hcan) != HAL_OK ||
@@ -379,6 +465,12 @@ void FDCAN_Start(FDCAN_HandleTypeDef* hcan, uint32_t ActiveITs)
         Error_Handler();
 }
 
+/**
+ * 启动 CAN（FDCAN 后端兼容实现，仅限 classic 模式）
+ * @param hcan can handle
+ * @param ActiveITs 需要额外开启的中断
+ * @note 要求句柄已配置为 FDCAN_FRAME_CLASSIC，否则触发断言
+ */
 void CAN_Start(CAN_HandleTypeDef* hcan, uint32_t ActiveITs)
 {
     // 使用 CAN_Start 必须保证 FDCAN 配置为 classic 模式
@@ -389,6 +481,12 @@ void CAN_Start(CAN_HandleTypeDef* hcan, uint32_t ActiveITs)
 
 namespace
 {
+/**
+ * 将接收回调登记到对应句柄的回调表，表不存在时按需新建
+ * @param hcan can handle
+ * @param callback 接收回调
+ * @note 回调表数量或表内回调数量达到上限时进入 Error_Handler()
+ */
 void RegisterCallback(FDCAN_HandleTypeDef* hcan, FifoReceiveCallback callback)
 {
     auto* map = get_map(hcan);
@@ -410,12 +508,25 @@ void RegisterCallback(FDCAN_HandleTypeDef* hcan, FifoReceiveCallback callback)
     map->callbacks[map->callback_count++] = callback;
 }
 } // namespace
+/**
+ * 注册 FDCAN 接收回调
+ * @param hcan can handle
+ * @param callback 接收回调函数，不可为空
+ * @note 非线程安全，建议在总线启动前完成注册
+ */
 void FDCAN_RegisterCallback(FDCAN_HandleTypeDef* hcan, FDCAN_FifoReceiveCallback_t callback)
 {
     assert(hcan != nullptr && callback != nullptr);
     RegisterCallback(hcan, callback);
 }
 
+/**
+ * 注册 CAN 接收回调（FDCAN 后端兼容实现）
+ * @param hcan can handle
+ * @param callback 接收回调函数，不可为空
+ * @note 要求句柄已配置为 FDCAN_FRAME_CLASSIC，否则触发断言
+ * @note 非线程安全，建议在总线启动前完成注册
+ */
 void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, CAN_FifoReceiveCallback_t callback)
 {
     assert(hcan != nullptr && callback != nullptr);
@@ -424,6 +535,8 @@ void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, CAN_FifoReceiveCallback_t cal
 }
 
 #else
+namespace
+{
 /**
  * 储存于软件缓冲区的 CAN 消息类型
  *
@@ -455,9 +568,9 @@ struct CAN_CallbackMap
 };
 
 // 根据 CAN 实例的数量定义回调表
-// CAN 实例的数量取决于芯片型号，且无法在编译器预知，故在 .hpp 内通过宏定义
+// CAN 实例的数量取决于芯片型号，且无法在编译期预知，故在 .hpp 内通过宏定义
 CAN_CallbackMap maps[CAN_NUM];
-size_t          map_size = 0;
+size_t          map_size = 0; ///< 当前已登记的回调表数量
 
 // 根据 can handle 的指针查找 can map
 CAN_CallbackMap* get_map(const CAN_HandleTypeDef* hcan)
@@ -473,10 +586,10 @@ CAN_CallbackMap* get_map(const CAN_HandleTypeDef* hcan)
 /**
  * 发送一条 CAN 消息
  * @param hcan can handle
- * @param header CAN_TxHeaderTypeDef
- * @param data 数据
+ * @param header 发送帧头，包含 ID 类型、数据/远程帧标志与 DLC
+ * @param data 待发送数据，长度由 header->DLC 决定（不超过 8 字节）
  * @note 本函数是线程安全的
- * @return mailbox, 0xFFFF 表示发送失败
+ * @return 发送使用的 mailbox 编号，CAN_SEND_FAILED(0xFFFF) 表示发送失败
  */
 uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
                          const CAN_TxHeaderTypeDef* header,
@@ -518,9 +631,11 @@ uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
 }
 
 /**
- * CAN 初始化
+ * 启动 CAN 并开启中断
  * @param hcan can handle
- * @param ActiveITs CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING
+ * @param ActiveITs 需要额外开启的中断，如
+ *        CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING
+ * @note 驱动会额外开启 CAN_IT_TX_MAILBOX_EMPTY，软件发送队列依赖该中断
  */
 void CAN_Start(CAN_HandleTypeDef* hcan, const uint32_t ActiveITs)
 {
@@ -539,11 +654,12 @@ void CAN_Start(CAN_HandleTypeDef* hcan, const uint32_t ActiveITs)
 }
 
 /**
- * 注册 CAN Fifo 处理回调
+ * 注册 CAN 接收回调
  *
+ * 同一条总线上可以注册多个回调，收到帧后会依次调用。
  * @attention 本函数非线程安全，调用时请注意
- * @param hcan hcan
- * @param callback 回调函数指针
+ * @param hcan can handle
+ * @param callback 回调函数指针，不可为空
  */
 void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, const CAN_FifoReceiveCallback_t callback)
 {
@@ -586,6 +702,13 @@ void CAN_RegisterCallback(CAN_HandleTypeDef* hcan, const CAN_FifoReceiveCallback
 //         callbacks[filter_match_index] = NULL;
 // }
 
+/**
+ * CAN 接收分发
+ *
+ * 循环取出指定 FIFO 中的所有帧，并依次调用该总线上注册的各个回调函数。
+ * @param hcan can handle
+ * @param fifo CAN_RX_FIFO0 或 CAN_RX_FIFO1
+ */
 void CAN_RxDispatch(CAN_HandleTypeDef* hcan, uint32_t fifo)
 {
     // 采用 while 循环来确保清空队列
@@ -611,9 +734,9 @@ void CAN_RxDispatch(CAN_HandleTypeDef* hcan, uint32_t fifo)
 }
 
 /**
- * CAN Fifo0 接收处理函数
+ * CAN Rx FIFO0 接收处理函数
  *
- * 本函数将会根据 hcan 和 rx_header 内部的 filter_id 来调用对应的回调函数
+ * 取出 FIFO0 中的所有待处理帧，并分发到该总线上注册的各个回调函数。
  * @param hcan can handle
  */
 void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
@@ -621,9 +744,9 @@ void CAN_Fifo0ReceiveCallback(CAN_HandleTypeDef* hcan)
     CAN_RxDispatch(hcan, CAN_RX_FIFO0);
 }
 /**
- * CAN Fifo1 接收处理函数
+ * CAN Rx FIFO1 接收处理函数
  *
- * 本函数将会根据 hcan 和 rx_header 内部的 filter_id 来调用对应的回调函数
+ * 取出 FIFO1 中的所有待处理帧，并分发到该总线上注册的各个回调函数。
  * @param hcan can handle
  */
 void CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
@@ -632,7 +755,9 @@ void CAN_Fifo1ReceiveCallback(CAN_HandleTypeDef* hcan)
 }
 
 /**
- * HAL CAN TX 中断回调
+ * HAL CAN Tx 完成中断回调
+ *
+ * 硬件 mailbox 空出后，从软件发送队列中取出待发送帧继续发送。
  * @param hcan can handle
  */
 void CAN_TxMailboxCpltCallback(CAN_HandleTypeDef* hcan)
@@ -656,6 +781,9 @@ void CAN_TxMailboxCpltCallback(CAN_HandleTypeDef* hcan)
 
 /**
  * 注册 CAN 主回调函数
+ *
+ * 注册接收 FIFO 与三个发送 mailbox 完成回调，需在 HAL_CAN_Init() 之后、
+ * CAN_Start() 之前调用。
  * @param hcan can handle
  */
 void CAN_InitMainCallback(CAN_HandleTypeDef* hcan)
