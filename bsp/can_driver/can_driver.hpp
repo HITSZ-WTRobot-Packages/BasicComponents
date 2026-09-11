@@ -119,4 +119,15 @@ void FDCAN_InitMainCallback(FDCAN_HandleTypeDef* hcan);
 void FDCAN_Start(FDCAN_HandleTypeDef* hcan, uint32_t ActiveITs);
 
 void FDCAN_RegisterCallback(FDCAN_HandleTypeDef* hcan, FDCAN_FifoReceiveCallback_t callback);
+
+/**
+ * bxCAN 过滤器配置兼容接口
+ *
+ * 将 bxCAN 风格的 CAN_FilterTypeDef 转换为 FDCAN 过滤器并写入。
+ * @param hcan can handle
+ * @param filterConfig bxCAN 风格过滤器配置
+ * @return 配置结果，成功返回 HAL_OK
+ */
+HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*        hcan,
+                                       const CAN_FilterTypeDef* filterConfig);
 #endif

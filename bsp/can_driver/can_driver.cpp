@@ -294,6 +294,84 @@ uint32_t CAN_SendMessage(CAN_HandleTypeDef*         hcan,
     return FDCAN_SendMessage(hcan, &fdcan_header, data);
 }
 
+/**
+ * 将 bxCAN 风格的过滤器配置转换为 FDCAN 配置。
+ *
+ * 32 位 bxCAN 过滤器由 FR1/FR2 两个字组成，每个字均由
+ * FilterIdHigh/FilterMaskIdHigh 作为高 16 位、FilterIdLow/FilterMaskIdLow
+ * 作为低 16 位拼接而成，因此 ID 与掩码无论落在高半字还是低半字都按
+ * bxCAN 字布局解码，不会丢弃低半字。
+ *
+ * @return 配置结果：成功返回 HAL_OK，参数或配置不受支持时返回 HAL_ERROR
+ */
+HAL_StatusTypeDef HAL_CAN_ConfigFilter(CAN_HandleTypeDef*       hcan,
+                                       const CAN_FilterTypeDef* filterConfig)
+{
+    if (hcan == nullptr || filterConfig == nullptr)
+        return HAL_ERROR;
+
+    FDCAN_FilterTypeDef fdcan_filter{};
+    fdcan_filter.FilterIndex = filterConfig->FilterBank;
+
+    if (filterConfig->FilterActivation == CAN_FILTER_DISABLE)
+    {
+        fdcan_filter.IdType       = FDCAN_STANDARD_ID;
+        fdcan_filter.FilterType   = FDCAN_FILTER_MASK;
+        fdcan_filter.FilterConfig = FDCAN_FILTER_DISABLE;
+    }
+    else if (filterConfig->FilterScale == CAN_FILTERSCALE_16BIT)
+    {
+        // FDCAN_FILTER_DUAL 只能表达两个 ID 列表，不能表达两个 ID-mask。
+        if (filterConfig->FilterMode != CAN_FILTERMODE_IDLIST)
+            return HAL_ERROR;
+
+        fdcan_filter.IdType       = FDCAN_STANDARD_ID;
+        fdcan_filter.FilterType   = FDCAN_FILTER_DUAL;
+        fdcan_filter.FilterID1    = filterConfig->FilterIdHigh >> 5;
+        fdcan_filter.FilterID2    = filterConfig->FilterIdLow >> 5;
+        fdcan_filter.FilterConfig = filterConfig->FilterFIFOAssignment == CAN_FILTER_FIFO1
+                                            ? FDCAN_FILTER_TO_RXFIFO1
+                                            : FDCAN_FILTER_TO_RXFIFO0;
+    }
+    else if (filterConfig->FilterScale == CAN_FILTERSCALE_32BIT)
+    {
+        const uint32_t id_word     = (filterConfig->FilterIdHigh << 16) | filterConfig->FilterIdLow;
+        const uint32_t second_word = (filterConfig->FilterMaskIdHigh << 16) |
+                                     filterConfig->FilterMaskIdLow;
+        // FR1/FR2 布局为 STID[10:0] | EXID[17:0] | IDE | RTR：IDE 位置位表示
+        // 扩展帧（ID 位于 bit 20:3，右移 3），否则为标准帧（ID 位于 bit 31:21）。
+        // 掩码字与 ID 字布局相同，故共用同一个右移位数。
+        const bool     id_is_extended = (id_word & CAN_ID_EXT) != 0U;
+        const uint32_t id_shift       = id_is_extended ? 3U : 21U;
+
+        if (filterConfig->FilterMode == CAN_FILTERMODE_IDLIST)
+        {
+            // ID 列表模式下第二个字是第二个待匹配 ID；FDCAN 的 DUAL 过滤器
+            // 要求两个 ID 类型一致，无法表达标准/扩展混合的列表。
+            if (((second_word & CAN_ID_EXT) != 0U) != id_is_extended)
+                return HAL_ERROR;
+            fdcan_filter.FilterType = FDCAN_FILTER_DUAL;
+        }
+        else
+        {
+            fdcan_filter.FilterType = FDCAN_FILTER_MASK;
+        }
+
+        fdcan_filter.IdType       = id_is_extended ? FDCAN_EXTENDED_ID : FDCAN_STANDARD_ID;
+        fdcan_filter.FilterID1    = id_word >> id_shift;
+        fdcan_filter.FilterID2    = second_word >> id_shift;
+        fdcan_filter.FilterConfig = filterConfig->FilterFIFOAssignment == CAN_FILTER_FIFO1
+                                            ? FDCAN_FILTER_TO_RXFIFO1
+                                            : FDCAN_FILTER_TO_RXFIFO0;
+    }
+    else
+    {
+        return HAL_ERROR;
+    }
+
+    return HAL_FDCAN_ConfigFilter(hcan, &fdcan_filter);
+}
+
 void FDCAN_Start(FDCAN_HandleTypeDef* hcan, uint32_t ActiveITs)
 {
     if (HAL_FDCAN_Start(hcan) != HAL_OK ||
