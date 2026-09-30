@@ -30,9 +30,10 @@ public:
      *
      * @param ref 目标值
      * @param fdb 反馈值
+     * @param ff 前馈输入
      * @return 限幅后的控制输出
      */
-    float calc(const float& ref, const float& fdb);
+    float calc(const float& ref, const float& fdb, const float& ff = 0.0f);
     /**
      * @brief 更新控制参数。
      */
