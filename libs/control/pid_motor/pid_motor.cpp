@@ -11,7 +11,7 @@
 
 #include <algorithm>
 
-float PIDMotor::calc(const float& ref, const float& fdb)
+float PIDMotor::calc(const float& ref, const float& fdb, const float& ff)
 {
     // 保存输入，便于上层调试和状态追踪。
     ref_ = ref;
@@ -27,10 +27,10 @@ float PIDMotor::calc(const float& ref, const float& fdb)
     const float p = cfg_.Kp * error_;
     const float d = cfg_.Kd * derivative;
 
-    const float output_pd = std::clamp(p + d, -cfg_.abs_output_max, cfg_.abs_output_max);
+    const float output_pd_ff = std::clamp(p + d + ff, -cfg_.abs_output_max, cfg_.abs_output_max);
 
     // 留出给积分项的剩余空间，避免积分项把总输出再次推爆。
-    float i_limit = cfg_.abs_output_max - std::fabsf(output_pd);
+    float i_limit = cfg_.abs_output_max - std::fabsf(output_pd_ff);
     if (i_limit < 0.0f)
         i_limit = 0.0f;
 
@@ -43,8 +43,8 @@ float PIDMotor::calc(const float& ref, const float& fdb)
     else if (integral_ < -i_limit)
         integral_ = -i_limit;
 
-    // 最终输出 = P + D + I。
-    output_ = output_pd + integral_;
+    // 最终输出 = P + D + I + FF。
+    output_ = output_pd_ff + integral_;
 
     prev_error_ = error_;
     return output_;
