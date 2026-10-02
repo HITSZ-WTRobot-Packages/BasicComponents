@@ -1,0 +1,4 @@
+name = "StaticArena"
+pkgname = "memory::StaticArena"
+version = "0.1.0"
+dependencies = []
