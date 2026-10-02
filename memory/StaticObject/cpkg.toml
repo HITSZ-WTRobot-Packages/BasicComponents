@@ -1,0 +1,4 @@
+name = "StaticObject"
+pkgname = "memory::StaticObject"
+version = "0.1.0"
+dependencies = []
