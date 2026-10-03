@@ -1,0 +1,5 @@
+format_version = 1
+name = "DMABuffer"
+pkgname = "memory::DMABuffer"
+version = "0.1.0"
+dependencies = []
