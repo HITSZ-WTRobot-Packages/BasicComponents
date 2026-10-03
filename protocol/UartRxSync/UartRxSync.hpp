@@ -9,6 +9,7 @@
 #ifndef UARTRXSYNC_HPP
 #define UARTRXSYNC_HPP
 
+#include "dma_buffer.hpp"
 #include "main.h"
 
 #ifndef HAL_UART_MODULE_ENABLED
@@ -59,7 +60,12 @@ template <size_t HeaderLen, size_t FrameLen, bool DecodeWithHeader = false> clas
     static_assert(FrameLen > HeaderLen);
 
 public:
-    explicit UartRxSync(UART_HandleTypeDef* huart) : huart_(huart) {}
+    using Buffer = memory::DMABuffer<FrameLen>;
+
+    explicit UartRxSync(UART_HandleTypeDef* huart, Buffer& buffer) :
+        huart_(huart), rx_buffer_(buffer)
+    {
+    }
     virtual ~UartRxSync() = default;
     enum class SyncState
     {
@@ -145,10 +151,9 @@ public:
         constexpr uint32_t uart_rx_error_mask = HAL_UART_ERROR_PE | HAL_UART_ERROR_FE |
                                                 HAL_UART_ERROR_NE | HAL_UART_ERROR_ORE;
 
-        const uint32_t error_code = huart_->ErrorCode;
-        const bool     has_uart_rx_error =
-                (error_code & uart_rx_error_mask) != 0U;
-        const bool has_rx_dma_error = (error_code & HAL_UART_ERROR_DMA) != 0U &&
+        const uint32_t error_code        = huart_->ErrorCode;
+        const bool     has_uart_rx_error = (error_code & uart_rx_error_mask) != 0U;
+        const bool     has_rx_dma_error  = (error_code & HAL_UART_ERROR_DMA) != 0U &&
                                       huart_->hdmarx != nullptr &&
                                       huart_->hdmarx->ErrorCode != HAL_DMA_ERROR_NONE;
 
@@ -206,8 +211,9 @@ private:
 
     service::Watchdog watchdog_{};
 
-    uint8_t rx_buffer_[FrameLen]{};
-    size_t  hdr_idx_{ 0 };
+    Buffer& rx_buffer_;
+
+    size_t hdr_idx_{ 0 };
 
 private:
     bool check_header()
