@@ -95,6 +95,7 @@ private:
         return reinterpret_cast<T*>(storage_);
     }
 
+    T* const debug_ = initialization_storage();
     alignas(T) std::byte storage_[sizeof(T)]{};
     bool initialized_ = false;
 };
