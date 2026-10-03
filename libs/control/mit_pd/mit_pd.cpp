@@ -9,16 +9,17 @@
  */
 #include "mit_pd.hpp"
 
-float MITPD::calc(const float& p_ref, const float& p_fdb, const float& v_ref, const float& v_fdb)
+float MITPD::calc(const float& p_ref, const float& p_fdb, const float& v_ref, const float& v_fdb, const float& t_ff)
 {
     // 保存本次输入，便于上层调试和状态追踪。
     p_ref_ = p_ref;
     p_fdb_ = p_fdb;
     v_ref_ = v_ref;
     v_fdb_ = v_fdb;
+    t_ff_ = t_ff;
 
     // 控制律：位置误差提供主驱动力，速度误差提供阻尼。
-    output_ = cfg_.Kp * (p_ref_ - p_fdb_) + cfg_.Kd * (v_ref_ - v_fdb_);
+    output_ = t_ff_ + cfg_.Kp * (p_ref_ - p_fdb_) + cfg_.Kd * (v_ref_ - v_fdb_);
     // 输出限幅，防止下游驱动饱和。
     if (output_ > cfg_.abs_output_max)
         output_ = cfg_.abs_output_max;
@@ -34,5 +35,6 @@ void MITPD::reset()
     p_fdb_ = 0.0f;
     v_ref_ = 0.0f;
     v_fdb_ = 0.0f;
+    t_ff_ = 0.0f;
     output_ = 0.0f;
 }
