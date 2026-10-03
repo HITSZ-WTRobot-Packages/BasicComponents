@@ -32,7 +32,7 @@ public:
      * @param v_fdb 速度反馈
      * @return 限幅后的控制输出
      */
-    float calc(const float& p_ref, const float& p_fdb, const float& v_ref, const float& v_fdb);
+    float calc(const float& p_ref, const float& p_fdb, const float& v_ref, const float& v_fdb, const float& t_ff);
     void  setConfig(const Config& cfg) { cfg_ = cfg; }
     void  reset();
 
@@ -45,6 +45,7 @@ private:
     float p_fdb_  = 0.0f; ///< 最近一次位置反馈
     float v_ref_  = 0.0f; ///< 最近一次速度给定
     float v_fdb_  = 0.0f; ///< 最近一次速度反馈
+    float t_ff_   = 0.0f; ///< 最近一次前馈扭矩
     float output_ = 0.0f; ///< 最近一次控制输出
 };
 
