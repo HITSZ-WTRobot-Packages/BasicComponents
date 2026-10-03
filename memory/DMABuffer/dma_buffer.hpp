@@ -27,15 +27,18 @@ template <std::size_t N, std::size_t Alignment = 32> class alignas(Alignment) DM
     static_assert(N > 0, "DMABuffer<N> requires a positive byte capacity");
 
 public:
-    constexpr DMABuffer() noexcept          = default;
-    DMABuffer(const DMABuffer&)             = delete;
-    DMABuffer& operator=(const DMABuffer&)  = delete;
-    DMABuffer(DMABuffer&&)                  = delete;
-    DMABuffer& operator=(DMABuffer&&)       = delete;
+    constexpr DMABuffer() noexcept         = default;
+    DMABuffer(const DMABuffer&)            = delete;
+    DMABuffer& operator=(const DMABuffer&) = delete;
+    DMABuffer(DMABuffer&&)                 = delete;
+    DMABuffer& operator=(DMABuffer&&)      = delete;
 
-    [[nodiscard]] constexpr std::uint8_t* data() noexcept { return storage_; }
+    [[nodiscard]] constexpr std::uint8_t*       data() noexcept { return storage_; }
     [[nodiscard]] constexpr const std::uint8_t* data() const noexcept { return storage_; }
-    [[nodiscard]] static constexpr std::size_t size() noexcept { return N; }
+    [[nodiscard]] static constexpr std::size_t  size() noexcept { return N; }
+
+    constexpr operator std::uint8_t*() noexcept { return data(); }
+    constexpr operator const std::uint8_t*() const noexcept { return data(); }
 
 private:
     std::uint8_t storage_[N]{};
