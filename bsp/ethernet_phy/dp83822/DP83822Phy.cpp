@@ -75,15 +75,31 @@ constexpr std::uint32_t kPhyIdMask  = 0xFFFFFFF0U; /* 低 4 位为版本号，�
 
 /* 寄存器地址。 */
 constexpr std::uint16_t kRegBmcr    = 0x0000U; /* 基本模式控制 */
+constexpr std::uint16_t kRegBmsr    = 0x0001U; /* 基本模式状态 */
 constexpr std::uint16_t kRegPhyidr1 = 0x0002U; /* PHY 标识符 #1 */
 constexpr std::uint16_t kRegPhyidr2 = 0x0003U; /* PHY 标识符 #2 */
+constexpr std::uint16_t kRegAnar    = 0x0004U; /* 自动协商通告 */
 constexpr std::uint16_t kRegCr1     = 0x0009U; /* PHY 控制 #1 */
 constexpr std::uint16_t kRegPhysts  = 0x0010U; /* PHY 状态 */
 constexpr std::uint16_t kRegPhycr   = 0x0019U; /* PHY 控制 */
 constexpr std::uint16_t kRegPhyrcr  = 0x001FU; /* PHY 复位控制 */
 
 /* BMCR 位。 */
-constexpr std::uint16_t kBmcrAutonegEnable = 0x1000U; /* bit 12：自动协商使能 */
+constexpr std::uint16_t kBmcrAutonegEnable  = 0x1000U; /* bit 12：自动协商使能 */
+constexpr std::uint16_t kBmcrRestartAutoneg = 0x0200U; /* bit 9：重启自动协商（自清零） */
+constexpr std::uint16_t kBmcrSpeed100       = 0x2000U; /* bit 13：1 = 100 Mbps */
+constexpr std::uint16_t kBmcrDuplexFull     = 0x0100U; /* bit 8：1 = 全双工 */
+
+/* BMSR 位。 */
+constexpr std::uint16_t kBmsrAutonegCapable = 0x0008U; /* bit 3：支持自动协商 */
+constexpr std::uint16_t kBmsrModeShift      = 11U;     /* bits 11..14：10H/10F/100H/100F */
+constexpr std::uint16_t kBmsrModeMask       = 0x7800U;
+
+/* ANAR 位：bits5..8 与 PhyLinkMode 低 4 位同序，bits4..0 为 IEEE 802.3 选择子域。 */
+constexpr std::uint16_t kAnarModeShift    = 5U;
+constexpr std::uint16_t kAnarModeMask     = 0x01E0U;
+constexpr std::uint16_t kAnarSelectorMask = 0x001FU;
+constexpr std::uint16_t kAnarIeee8023Sel  = 0x0001U; /* 选择子域值 1 */
 
 /* PHYSTS 位。 */
 constexpr std::uint16_t kPhystsLinkStatus     = 0x0001U; /* bit 0：链路已建立 */
@@ -102,49 +118,120 @@ constexpr std::uint16_t kPhyrcrSoftReset = 0x8000U; /* bit 15：等效硬件复�
 
 /* PHYRCR 软件复位自清零等待上限，单位 ms。 */
 constexpr std::uint32_t kResetTimeoutMs = 500U;
+
+/* 全部受支持模式位，用于判定未知位与统计强制模式位数。 */
+constexpr std::uint8_t kKnownModeBits = static_cast<std::uint8_t>(bsp::ethernet_phy::PhyLinkMode::All10_100);
+
+/* 掩码中是否含未定义的模式位。 */
+constexpr bool hasUnknownModeBits(const bsp::ethernet_phy::PhyLinkMode modes) noexcept
+{
+    return (static_cast<std::uint8_t>(modes) & static_cast<std::uint8_t>(~kKnownModeBits)) != 0U;
+}
+
+/* 置位个数，用于强制模式“恰好一种模式”的校验。 */
+constexpr unsigned bitCount(const std::uint8_t value) noexcept
+{
+    unsigned count = 0U;
+    for (std::uint8_t bits = value; bits != 0U; bits >>= 1U)
+        count += static_cast<unsigned>(bits & 1U);
+    return count;
+}
+
+/* 把模式掩码映射为 ANAR bits5..8 的通告位。 */
+constexpr std::uint16_t anarAdvertisement(const bsp::ethernet_phy::PhyLinkMode modes) noexcept
+{
+    return static_cast<std::uint16_t>(
+        static_cast<std::uint16_t>(static_cast<std::uint8_t>(modes) & kKnownModeBits) << kAnarModeShift);
+}
 } // namespace
+
+namespace bsp::ethernet_phy
+{
 
 DP83822Phy::DP83822Phy(ETH_HandleTypeDef& eth, const std::uint32_t address) noexcept
     : eth_(eth),
       requested_address_(address)
 {
-    /* 构造只保存配置，不访问硬件。 */
+    /* 只保存配置：不访问硬件、不产生总线流量、不会失败，可安全用于静态存储期对象。 */
 }
 
-PhyResult DP83822Phy::init() noexcept
+PhyResult DP83822Phy::start(const PhyLinkConfig& config) noexcept
 {
-    /* 先撤销旧的就绪状态与地址：任何失败路径都不会残留上一次的成功状态。 */
-    initialized_ = false;
-    address_     = 0U;
+    /* 每次调用都从干净状态完整重建：清除此前就绪/失效状态与能力缓存。 */
+    status_            = PhyResult::NotInitialized;
+    address_           = 0U;
+    supported_modes_   = PhyLinkMode::None;
+    autoneg_supported_ = false;
 
-    /* 非法地址无需访问硬件即可判定。 */
+    /* 地址与 config 形状非法必须在任何 HAL/MDIO 动作之前判定。 */
+    PhyResult status = PhyResult::Ok;
     if ((requested_address_ != AutoAddress) && (requested_address_ > kAddressMax))
-        return PhyResult::AddressError;
+        status = PhyResult::InvalidArgument;
+    if (status == PhyResult::Ok)
+        status = validateConfig(config);
 
-    HAL_ETH_SetMDIOClockRange(&eth_);
-
-    PhyResult status = selectAddress();
-    if (status != PhyResult::Ok)
+    if (status == PhyResult::Ok)
     {
-        address_ = 0U;
-        return status;
+        HAL_ETH_SetMDIOClockRange(&eth_);
+        status = selectAddress();
     }
+    if (status == PhyResult::Ok)
+        status = resetAndConfigure();
+    if (status == PhyResult::Ok)
+        status = readAndCacheCapabilities();
+    /* 能力来自启动过程中读到的寄存器：此处 Unsupported 不保证此前没有写入。 */
+    if (status == PhyResult::Ok)
+        status = validateConfigSupport(config);
+    if (status == PhyResult::Ok)
+        status = applyConfig(config);
 
-    status = resetAndConfigure();
     if (status != PhyResult::Ok)
-    {
         address_ = 0U;
-        return status;
-    }
 
-    initialized_ = true;
+    status_ = status;
+    return status_;
+}
+
+PhyResult DP83822Phy::validateConfig(const PhyLinkConfig& config) noexcept
+{
+    if ((config.modes == PhyLinkMode::None) || hasUnknownModeBits(config.modes))
+        return PhyResult::InvalidArgument;
+
+    /* 强制模式必须恰含一种模式；这是纯参数约束，与器件能力无关。 */
+    if (!config.autoNegotiation && (bitCount(static_cast<std::uint8_t>(config.modes)) != 1U))
+        return PhyResult::InvalidArgument;
+
     return PhyResult::Ok;
+}
+
+PhyResult DP83822Phy::validateConfigSupport(const PhyLinkConfig& config) const noexcept
+{
+    const std::uint8_t requested = static_cast<std::uint8_t>(config.modes);
+    const std::uint8_t supported = static_cast<std::uint8_t>(supported_modes_);
+
+    if (config.autoNegotiation)
+    {
+        /* 自动协商既要求器件支持该能力，也要求请求模式全部在支持范围内。 */
+        if (!autoneg_supported_ || ((requested & static_cast<std::uint8_t>(~supported)) != 0U))
+            return PhyResult::Unsupported;
+        return PhyResult::Ok;
+    }
+
+    if ((requested & supported) == 0U)
+        return PhyResult::Unsupported;
+
+    return PhyResult::Ok;
+}
+
+PhyResult DP83822Phy::status() const noexcept
+{
+    return status_;
 }
 
 PhyResult DP83822Phy::readLink(PhyLinkState& link_state) noexcept
 {
-    /* 尚未成功初始化时不触碰硬件，也不改动输出。 */
-    if (!initialized_)
+    /* 未就绪时不触碰硬件，也不改动输出。 */
+    if (status_ != PhyResult::Ok)
         return PhyResult::NotInitialized;
 
     std::uint16_t physts = 0U;
@@ -152,7 +239,7 @@ PhyResult DP83822Phy::readLink(PhyLinkState& link_state) noexcept
     if (status != PhyResult::Ok)
         return status;
 
-    /* 断链时无需读取 BMCR，直接报告 Down。 */
+    /* 无链路指示时直接报告 Down；这不表示自动协商未在进行。 */
     if ((physts & kPhystsLinkStatus) == 0U)
     {
         link_state = PhyLinkState::Down;
@@ -184,6 +271,121 @@ PhyResult DP83822Phy::readLink(PhyLinkState& link_state) noexcept
         decoded = full_duplex ? PhyLinkState::Up100Full : PhyLinkState::Up100Half;
 
     link_state = decoded;
+    return PhyResult::Ok;
+}
+
+PhyResult DP83822Phy::getCapabilities(PhyCapabilities& capabilities) noexcept
+{
+    /* 能力缓存仅在 start() 成功后有效，不产生额外总线读取。 */
+    if (status_ != PhyResult::Ok)
+        return PhyResult::NotInitialized;
+
+    capabilities.modes           = supported_modes_;
+    capabilities.autoNegotiation = autoneg_supported_;
+    return PhyResult::Ok;
+}
+
+PhyResult DP83822Phy::configureLink(const PhyLinkConfig& config) noexcept
+{
+    if (status_ != PhyResult::Ok)
+        return PhyResult::NotInitialized;
+
+    /* 非法/不支持配置必须在任何寄存器访问之前返回。 */
+    PhyResult status = validateConfig(config);
+    if (status != PhyResult::Ok)
+        return status;
+
+    status = validateConfigSupport(config);
+    if (status != PhyResult::Ok)
+        return status;
+
+    return applyConfig(config);
+}
+
+PhyResult DP83822Phy::applyConfig(const PhyLinkConfig& config) noexcept
+{
+    /* 写入之前先读取真实现状；读取失败只报告错误，不使对象失效。 */
+    std::uint16_t bmcr = 0U;
+    std::uint16_t anar = 0U;
+    PhyResult status = readRegister(kRegBmcr, bmcr);
+    if (status != PhyResult::Ok)
+        return status;
+    status = readRegister(kRegAnar, anar);
+    if (status != PhyResult::Ok)
+        return status;
+
+    if (!config.autoNegotiation)
+    {
+        const bool speed_100   = (config.modes & PhyLinkMode::Base100Half) != PhyLinkMode::None ||
+                                 (config.modes & PhyLinkMode::Base100Full) != PhyLinkMode::None;
+        const bool full_duplex = (config.modes & PhyLinkMode::Base10Full) != PhyLinkMode::None ||
+                                 (config.modes & PhyLinkMode::Base100Full) != PhyLinkMode::None;
+
+        /* 强制模式：设定速率/双工位并清除自动协商使能，保持其余控制位。 */
+        std::uint16_t desired = bmcr;
+        desired &= static_cast<std::uint16_t>(
+            ~static_cast<std::uint16_t>(kBmcrAutonegEnable | kBmcrSpeed100 | kBmcrDuplexFull));
+        if (speed_100)
+            desired |= kBmcrSpeed100;
+        if (full_duplex)
+            desired |= kBmcrDuplexFull;
+
+        /* 相同的有效速率/双工/协商配置不重复写入，也不重启协商。 */
+        const std::uint16_t compare_mask =
+            static_cast<std::uint16_t>(~static_cast<std::uint16_t>(kBmcrRestartAutoneg));
+        if ((bmcr & compare_mask) == (desired & compare_mask))
+            return PhyResult::Ok;
+
+        desired |= kBmcrRestartAutoneg;
+        if (writeRegister(kRegBmcr, desired) != PhyResult::Ok)
+            return failAfterWrite();
+        return PhyResult::Ok;
+    }
+
+    /* 自动协商：按通告掩码更新 ANAR，保留暂停等无关位。 */
+    const std::uint16_t desired_anar = static_cast<std::uint16_t>(
+        (anar & static_cast<std::uint16_t>(~(kAnarModeMask | kAnarSelectorMask))) |
+        anarAdvertisement(config.modes) | kAnarIeee8023Sel);
+
+    const bool was_forced            = (bmcr & kBmcrAutonegEnable) == 0U;
+    const bool advertisement_changed = desired_anar != anar;
+
+    /* 已是自动协商且通告未变：不写寄存器、不重启协商。 */
+    if (!was_forced && !advertisement_changed)
+        return PhyResult::Ok;
+
+    if (advertisement_changed)
+    {
+        if (writeRegister(kRegAnar, desired_anar) != PhyResult::Ok)
+            return failAfterWrite();
+    }
+
+    const std::uint16_t desired_bmcr =
+        static_cast<std::uint16_t>(bmcr | kBmcrAutonegEnable | kBmcrRestartAutoneg);
+    if (writeRegister(kRegBmcr, desired_bmcr) != PhyResult::Ok)
+        return failAfterWrite();
+
+    return PhyResult::Ok;
+}
+
+PhyResult DP83822Phy::restartAutoNegotiation() noexcept
+{
+    if (status_ != PhyResult::Ok)
+        return PhyResult::NotInitialized;
+
+    std::uint16_t bmcr = 0U;
+    PhyResult status = readRegister(kRegBmcr, bmcr);
+    if (status != PhyResult::Ok)
+        return status;
+
+    /* 强制模式下没有可重启的自动协商；不产生任何写入。 */
+    if ((bmcr & kBmcrAutonegEnable) == 0U)
+        return PhyResult::Unsupported;
+
+    status = writeRegister(kRegBmcr, static_cast<std::uint16_t>(bmcr | kBmcrRestartAutoneg));
+    if (status != PhyResult::Ok)
+        return failAfterWrite();
+
     return PhyResult::Ok;
 }
 
@@ -252,9 +454,10 @@ PhyResult DP83822Phy::selectAddress() noexcept
         {
             bool matched = false;
 
-            /* 无器件时 MDIO 读可能失败，这类地址按无匹配处理并继续扫描。 */
-            if (probeAddress(addr, matched) != PhyResult::Ok)
-                continue;
+            /* 读取失败立即上报：不能把未读到的地址当作“无器件”，否则唯一性不成立。 */
+            const PhyResult status = probeAddress(addr, matched);
+            if (status != PhyResult::Ok)
+                return status;
 
             if (!matched)
                 continue;
@@ -266,7 +469,7 @@ PhyResult DP83822Phy::selectAddress() noexcept
         }
 
         if (matches == 0U)
-            return PhyResult::AddressError;
+            return PhyResult::NotFound;
 
         address_ = candidate;
         return PhyResult::Ok;
@@ -278,7 +481,7 @@ PhyResult DP83822Phy::selectAddress() noexcept
         return status;
 
     if (!matched)
-        return PhyResult::AddressError;
+        return PhyResult::NotFound;
 
     address_ = requested_address_;
     return PhyResult::Ok;
@@ -298,7 +501,7 @@ PhyResult DP83822Phy::resetAndConfigure() noexcept
 
     status = writeRegister(kRegPhyrcr, static_cast<std::uint16_t>(phyrcr | kPhyrcrSoftReset));
     if (status != PhyResult::Ok)
-        return status;
+        return failAfterWrite();
 
     const std::uint32_t start_tick = HAL_GetTick();
     for (;;)
@@ -321,3 +524,38 @@ PhyResult DP83822Phy::resetAndConfigure() noexcept
 
     return setRegisterBits(kRegCr1, kCr1RobustAutoMdix);
 }
+
+PhyResult DP83822Phy::readAndCacheCapabilities() noexcept
+{
+    std::uint16_t bmsr = 0U;
+    const PhyResult status = readRegister(kRegBmsr, bmsr);
+    if (status != PhyResult::Ok)
+        return status;
+
+    /* BMSR bits11..14 与 PhyLinkMode 低 4 位同序，直接映射。 */
+    const PhyLinkMode modes = static_cast<PhyLinkMode>(
+        static_cast<std::uint8_t>((bmsr & kBmsrModeMask) >> kBmsrModeShift));
+
+    /* 无任何支持模式时无法建立配置（强制模式也无从选择）；不做臆造回退。 */
+    if (modes == PhyLinkMode::None)
+    {
+        supported_modes_   = PhyLinkMode::None;
+        autoneg_supported_ = false;
+        return PhyResult::Unsupported;
+    }
+
+    /* 不支持自动协商仍可用强制模式，因此这里仍算成功，单独记录该能力。 */
+    supported_modes_   = modes;
+    autoneg_supported_ = (bmsr & kBmsrAutonegCapable) != 0U;
+    return PhyResult::Ok;
+}
+
+PhyResult DP83822Phy::failAfterWrite() noexcept
+{
+    /* 写失败后硬件配置不确定：对象失效；清除故障后再次调用 start() 即可恢复。 */
+    status_  = PhyResult::WriteError;
+    address_ = 0U;
+    return PhyResult::WriteError;
+}
+
+} // namespace bsp::ethernet_phy
