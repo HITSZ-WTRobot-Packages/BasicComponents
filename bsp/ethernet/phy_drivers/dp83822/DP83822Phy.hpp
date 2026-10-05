@@ -120,6 +120,7 @@ public:
      * @return Ok 成功（含正常断链 Down）；NotInitialized 表示 status() != Ok（不访问
      *         硬件）；ReadError 表示 MDIO 读取失败。
      * @note 失败时 link_state 保持不变。
+     * @note 先读取 BMSR；链路位为低时再读一次，清除历史断链锁存后再解码 PHYSTS。
      */
     [[nodiscard]] PhyResult readLink(PhyLinkState& link_state) noexcept override;
 
