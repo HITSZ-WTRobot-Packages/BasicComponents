@@ -1,0 +1,5 @@
+format_version = 1
+name = "LwipPlatform"
+pkgname = "EthernetPHY::LwipPlatform"
+version = "0.1.0"
+dependencies = ["EthernetPHY::Core", "FreeRTOS", "stm32cubemx"]
