@@ -295,6 +295,8 @@ static void low_level_init(struct netif *netif)
 #endif /* LWIP_ARP || LWIP_ETHERNET */
 
 /* USER CODE BEGIN LOW_LEVEL_INIT */
+    // 覆盖 CubeMX 默认发送入口；保留在 USER CODE 区以支持重新生成。
+    netif->linkoutput = lwip_platform_output;
 
 /* USER CODE END LOW_LEVEL_INIT */
 }
@@ -539,12 +541,6 @@ void pbuf_free_custom(struct pbuf *p)
 }
 
 /* USER CODE BEGIN 6 */
-/* Keep the generated pool-exhaustion gate; the UserCode RX task locks this call. */
-struct pbuf* ethernetif_platform_receive(struct netif* netif)
-{
-    return low_level_input(netif);
-}
-
 /**
 * @brief  Returns the current time in milliseconds
 *         when LWIP_TIMERS == 1 and NO_SYS == 1

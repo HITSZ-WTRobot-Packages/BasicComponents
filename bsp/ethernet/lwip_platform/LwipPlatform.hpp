@@ -22,8 +22,10 @@
  * 锁序与并发：
  *   - 固定锁序为 LwIP core lock → 本实例 RX 互斥体。
  *   - PHY 的 start()/readLink() 始终在 core lock 外调用。
- *   - MAC 转换（Get/Set/Start/Stop）同时受 core lock 与 RX 互斥体保护；原始接收回调
- *     在 RX 互斥体内执行，netif link 变更与 netif->input/pbuf_free 在 RX 互斥体外。
+ *   - MAC 转换（Get/Set/Start/Stop）同时受 core lock 与 RX 互斥体保护；input() 在 RX
+ *     互斥体内直接执行 HAL_ETH_ReadData，netif link 变更、netif->input/pbuf_free 均在
+ *     RX 互斥体外。
+ *   - output() 由 LwIP 在 core lock 内调用，自身不再获取 core lock。
  *   - init()/poll() 只由同一 EthLink 线程串行调用，不得并发。
  *
  * 编译前提：
@@ -35,6 +37,7 @@
 #include "IPhy.hpp"
 
 #include "cmsis_os2.h"
+#include "lwip/err.h"
 #include "main.h"
 
 #include <cstdint>
@@ -52,9 +55,6 @@ namespace bsp::ethernet_phy
 class LwipPlatform final
 {
 public:
-    /** @brief 原始接收回调类型；负责 DMA/RX pool 读取，返回收到的 pbuf 或 nullptr。 */
-    using ReceiveFunction = struct pbuf* (*)(struct netif*);
-
     /**
      * @brief 只保存借用引用并初始化成员；不访问 HAL、PHY 或 RTOS，不失败。
      * @param[in] eth STM32 ETH 句柄，借用，生命周期须覆盖本对象全部使用期。
@@ -96,18 +96,30 @@ public:
     bool poll() noexcept;
 
     /**
-     * @brief 在 RX 互斥体内执行原始接收回调，返回前释放互斥体。
-     * @return 收到的 pbuf，或 nullptr（未 prepare、空回调或取锁失败）。不得从 ISR 调用。
+     * @brief RX 线程入口：等待给定信号量，逐包经 HAL 读出并提交给 LwIP。
+     *
+     * 每轮在 RX 互斥体内直接调用 HAL_ETH_ReadData，取得 pbuf 后立即释放互斥体，
+     * 再在锁外调用 netif.input；提交失败时在锁外 pbuf_free 该包。HAL 报告无包
+     * （或 MAC 未启动）时结束本轮并回到信号量等待。RX pool 耗尽后，外部的 pbuf
+     * 回收回调须唤醒 RX 信号量，使 HAL 重新补充描述符；本函数不忙等可用缓冲。
+     *
+     * 未 prepare、信号量为空或 netif.input 为空时直接返回，不访问 HAL；
+     * 本函数不创建/删除任务或信号量，不得从 ISR 调用。
      */
-    struct pbuf* receive(struct netif& netif, ReceiveFunction receive_fn);
+    void input(struct netif& netif, osSemaphoreId_t rx_semaphore);
 
     /**
-     * @brief RX 线程入口：等待给定信号量，逐包提交给 LwIP，提交失败则释放。
+     * @brief 发送一个 pbuf 给 MAC，非阻塞、不等待也不重试。
      *
-     * 未 prepare、信号量为空、回调为空或 netif.input 为空时直接返回，不访问 HAL；
-     * 本函数不创建/删除任务或信号量。
+     * 前置：调用者持 LwIP core lock（本函数不再获取 core lock，只会按需回收已完成
+     * TX）；netif 已绑定、link 为 up、MAC 与 HAL 均处于 STARTED。
+     *
+     * pbuf 链长不得超过 ETH_TX_DESC_CNT；不分配/拷贝 payload。先回收已完成
+     * TX，再对 p 做一次 pbuf_ref，成功提交 HAL_ETH_Transmit_IT 后由 TxFree 回调
+     * 释放本次引用；失败立即 pbuf_free 撤销本次引用。描述符 BUSY 时立即返回 ERR_BUF，
+     * 不做任何等待。未就绪、链过长或 HAL 未启动返回 ERR_IF；p 为空返回 ERR_IF。
      */
-    void input(struct netif& netif, osSemaphoreId_t rx_semaphore, ReceiveFunction receive_fn);
+    err_t output(struct netif& netif, struct pbuf* p);
 
 private:
     /** @brief 在 core lock 内置链路为 down（幂等）。 */

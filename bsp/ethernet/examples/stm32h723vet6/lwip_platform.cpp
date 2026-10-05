@@ -6,6 +6,7 @@
  */
 #include "LwipPlatform.hpp"
 #include "DP83822Phy.hpp"
+#include "lwip_platform.hpp"
 #include "msp.hpp"
 
 #include <cstdint>
@@ -13,8 +14,6 @@
 /* ethernetif.c 定义的全局句柄；平台仅借用，不重建。 */
 extern "C" ETH_HandleTypeDef heth;
 extern "C" osSemaphoreId_t   RxPktSemaphore;
-// Defined in ethernetif.c USER CODE: preserves the generated RX-pool gate.
-extern "C" struct pbuf* ethernetif_platform_receive(struct netif* netif);
 
 namespace
 {
@@ -68,6 +67,14 @@ extern "C" void lwip_platform_input(void* argument)
 
     auto* netif = static_cast<struct netif*>(argument);
     // 信号量在创建 RX 线程前由 ethernetif.c 建立，不能在静态构造时捕获。
-    platform.input(*netif, RxPktSemaphore, ethernetif_platform_receive);
+    platform.input(*netif, RxPktSemaphore);
     Error_Handler(); // 正常 RX 循环不返回；无效前置条件交给工程错误策略。
+}
+
+extern "C" err_t lwip_platform_output(struct netif* netif, struct pbuf* packet)
+{
+    if (netif == nullptr)
+        return ERR_IF;
+
+    return platform.output(*netif, packet);
 }

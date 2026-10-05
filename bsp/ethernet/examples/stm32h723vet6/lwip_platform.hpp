@@ -6,16 +6,17 @@
  * EthernetPHY::LwipPlatform 包，借用 IPhy 与 ETH 句柄。
  *
  * 生命周期：prepare → HAL_ETH_Init → RX pool/信号量/线程建立 → init → 周期 poll。
- * init/poll 由同一 EthLink 线程串行调用；input 供 RX 线程使用。
+ * init/poll 由同一 EthLink 线程串行调用；input 供 RX 线程使用，output 在 LwIP core lock 内调用。
  * prepare/init/poll 返回 false 时调用方走 Error_Handler；init 成功不代表 link up。
  *
- * ethernetif.c 的接入与接收桥仅在 USER CODE 区；保持 KeepUserCode=true。
+ * ethernetif.c 仅在 USER CODE 区接入平台收发；保持 KeepUserCode=true。
  * .ld 的 ETH 段保留在 MEMORYMAP 自动生成标记之外，地址与 .ioc 堆配置一致。
  */
 #ifndef USERCODE_ETH_LWIP_PLATFORM_HPP
 #define USERCODE_ETH_LWIP_PLATFORM_HPP
 
 #include <stdbool.h>
+#include "lwip/err.h"
 
 #ifdef __cplusplus
 extern "C"
@@ -23,6 +24,7 @@ extern "C"
 #endif
 
 struct netif;
+struct pbuf;
 
 /**
  * @brief 在首次 HAL_ETH_Init 之前调用：创建 RX/HAL 互斥体并注册工程选择的 ETH MSP 回调。
@@ -48,6 +50,9 @@ bool lwip_platform_poll(void);
 
 /** @brief RX 线程入口；等待既有 RX 信号量，逐包提交给 LwIP，提交失败则释放。 */
 void lwip_platform_input(void* argument);
+
+/** @brief 非阻塞 linkoutput；调用方持 LwIP core lock，描述符繁忙时返回 ERR_BUF。 */
+err_t lwip_platform_output(struct netif* netif, struct pbuf* packet);
 
 #ifdef __cplusplus
 }
