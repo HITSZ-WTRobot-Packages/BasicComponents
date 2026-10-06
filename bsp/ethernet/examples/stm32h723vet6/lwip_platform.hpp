@@ -43,8 +43,9 @@ bool lwip_platform_init(struct netif* netif);
 
 /**
  * @brief 由 EthLink 线程周期调用：读取 PHY 链路并按需切换 MAC 与 netif link。
- * @return true 本轮状态已处理（含正常断链/协商）；false 表示 PHY 读取或 MAC 配置/启停失败，
- *         链路保持在 down，调用方须 Error_Handler。本函数不做内部重试。
+ * @return true 本轮处理成功，或 PHY 读取失败但 MAC 已安全停止，可由下一周期重新检查；
+ *         true 不代表链路为 up。false 表示 MAC 配置/启停失败、未初始化或 PHY 状态非法，
+ *         调用方须 Error_Handler。本函数不做内部重试，PHY 读取失败时链路保持 down。
  */
 bool lwip_platform_poll(void);
 

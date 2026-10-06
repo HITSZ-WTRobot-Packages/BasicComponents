@@ -103,21 +103,30 @@ bool LwipPlatform::init(struct netif& netif, const PhyLinkConfig& config) noexce
     return true;
 }
 
-bool LwipPlatform::poll() noexcept
+PollResult LwipPlatform::poll() noexcept
 {
     if (!initialized_)
-        return false;
+        return PollResult::NotInitialized;
 
-    PhyLinkState state{};
-    if (phy_.readLink(state) != PhyResult::Ok)
+    PhyLinkState    state{};
+    const PhyResult read_result = phy_.readLink(state);
+    if (read_result != PhyResult::Ok)
     {
         /* 读取失败：不沿用未更新状态，强制 link down 并尽力停止已启动的 MAC。 */
         LOCK_TCPIP_CORE();
         setLinkDownLocked();
         (void)HAL_ETH_ReleaseTxPacket(&eth_);
-        (void)stopMacLocked();
+        const bool stop_ok = stopMacLocked();
         UNLOCK_TCPIP_CORE();
-        return false;
+
+        /* 停止失败优先上报，绝不吞掉；其余按 readLink 的实际失败原因区分。 */
+        if (!stop_ok)
+            return PollResult::MacStopError;
+        if (read_result == PhyResult::ReadError)
+            return PollResult::PhyReadError;
+        if (read_result == PhyResult::NotInitialized)
+            return PollResult::NotInitialized;
+        return PollResult::InvalidPhyState;
     }
 
     if (state == PhyLinkState::Down || state == PhyLinkState::Negotiating)
@@ -127,13 +136,13 @@ bool LwipPlatform::poll() noexcept
         (void)HAL_ETH_ReleaseTxPacket(&eth_);
         const bool stop_ok = stopMacLocked();
         UNLOCK_TCPIP_CORE();
-        return stop_ok;
+        return stop_ok ? PollResult::Ok : PollResult::MacStopError;
     }
 
     std::uint32_t speed  = 0U;
     std::uint32_t duplex = 0U;
     if (!mac_mode_for(state, speed, duplex))
-        return false; /* 未知枚举值：不猜测也不强转。 */
+        return PollResult::InvalidPhyState; /* 未知枚举值：不猜测也不强转，不继续配置。 */
 
     LOCK_TCPIP_CORE();
 
@@ -142,7 +151,7 @@ bool LwipPlatform::poll() noexcept
         /* 无模式变更时仅回收已完成 TX，保证最后一次发送的引用最终释放。 */
         (void)HAL_ETH_ReleaseTxPacket(&eth_);
         UNLOCK_TCPIP_CORE();
-        return true; /* 模式未变，不重复配置/启动。 */
+        return PollResult::Ok; /* 模式未变，不重复配置/启动。 */
     }
 
     setLinkDownLocked();
@@ -151,13 +160,13 @@ bool LwipPlatform::poll() noexcept
     {
         /* 旧模式停止失败：保持 link down，不继续 Set/Start。 */
         UNLOCK_TCPIP_CORE();
-        return false;
+        return PollResult::MacStopError;
     }
 
     if (!startMacLocked(speed, duplex))
     {
         UNLOCK_TCPIP_CORE();
-        return false;
+        return PollResult::MacStartError;
     }
 
     mac_started_   = true;
@@ -167,7 +176,7 @@ bool LwipPlatform::poll() noexcept
         netif_set_link_up(bound_netif_);
 
     UNLOCK_TCPIP_CORE();
-    return true;
+    return PollResult::Ok;
 }
 
 void LwipPlatform::input(struct netif& netif, osSemaphoreId_t rx_semaphore)

@@ -21,6 +21,7 @@ using bsp::ethernet_phy::DP83822Phy;
 using bsp::ethernet_phy::LwipPlatform;
 using bsp::ethernet_phy::PhyLinkConfig;
 using bsp::ethernet_phy::PhyLinkMode;
+using bsp::ethernet_phy::PollResult;
 
 // 目标板 strap 须与该地址一致；更换 PHY 时只改工程绑定与配置。
 constexpr std::uint32_t kPhyAddress = 1U;
@@ -54,7 +55,18 @@ extern "C" bool lwip_platform_init(struct netif* netif)
 
 extern "C" bool lwip_platform_poll(void)
 {
-    return platform.poll();
+    switch (platform.poll())
+    {
+    case PollResult::Ok:
+    case PollResult::PhyReadError:
+        return true; // PHY 读取失败已安全停用链路，留待下一周期重新检查。
+    case PollResult::MacStopError:
+    case PollResult::MacStartError:
+    case PollResult::NotInitialized:
+    case PollResult::InvalidPhyState:
+        return false;
+    }
+    return false;
 }
 
 extern "C" void lwip_platform_input(void* argument)

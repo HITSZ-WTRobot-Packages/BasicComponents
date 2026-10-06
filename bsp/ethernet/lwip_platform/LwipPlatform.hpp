@@ -7,8 +7,8 @@
  * 职责边界：
  *   - 只通过借用的 IPhy& 启动 PHY、查询链路并切换 MAC 速度/双工；不依赖具体 PHY
  *     类型、地址、MDIO 总线或板级 MSP，器件复位与寄存器配置由具体 PHY 驱动负责。
- *   - 不实现自动重试、遥测或工程错误处理策略；prepare/init/poll 返回 false 时由
- *     调用方决定终止流程。
+ *   - 不实现自动重试、遥测或工程错误处理策略；prepare/init 返回 false、poll 返回非
+ *     Ok 时由调用方决定处理流程。
  *   - 不拥有 ETH 句柄、PHY、netif 或 RX 信号量；这些由调用方创建并保证生命周期覆盖
  *     接收线程与链路线程的全部运行期。
  *
@@ -48,6 +48,22 @@ struct pbuf;
 
 namespace bsp::ethernet_phy
 {
+
+/**
+ * @brief poll() 的单轮结果；每轮恰返回一个值，调用方据此决定重试、容忍或退出。
+ *
+ * 仅 Ok 与 PhyReadError 表示本轮可继续运行（后者可由调用方容忍并在下一轮重试）；
+ * 其余取值均要求调用方按失败处理。
+ */
+enum class PollResult : std::uint8_t
+{
+    Ok,              ///< 本轮链路状态已成功应用，含正常断链、协商及 MAC 启动成功。
+    PhyReadError,    ///< readLink 寄存器读取失败；已按断链清理，下一轮可重试。
+    MacStopError,    ///< 需要停止 MAC 但取锁或 HAL_ETH_Stop_IT 失败；不谎称已停。
+    MacStartError,   ///< 获取/设置 MAC 配置、启动 MAC 或启动所需取锁失败；链路保持 down。
+    NotInitialized,  ///< 本对象未 init，或 readLink 报 PHY 未就绪；后者已按断链清理。
+    InvalidPhyState, ///< readLink 返回契约外结果，或返回未知链路状态；不继续配置。
+};
 
 /**
  * @brief 借用 ETH 句柄与 IPhy 的 LwIP 平台状态机。
@@ -90,10 +106,26 @@ public:
 
     /**
      * @brief 读取 PHY 链路并按需切换 MAC 与 netif link。
-     * @return true 本轮状态已处理（含正常断链/协商）；false 表示 PHY 读取或 MAC
-     *         配置/启停失败，链路保持在 down。本函数不重试，错误处理留给调用方。
+     *
+     * readLink() 每轮只调用一次，返回值用于区分失败原因；不额外访问 PHY 总线。
+     *
+     * @return 本轮结果：
+     *         - Ok：链路状态已成功应用，含正常断链、协商及 MAC 启动成功；稳定 Up
+     *           且模式未变时只回收 TX。
+     *         - PhyReadError：readLink 报寄存器读取失败；已置 link down、回收已完成
+     *           TX，并确认 MAC 已停止或本就未启动，可由下一周期重新检查。
+     *         - NotInitialized：本对象未 init 时直接返回；若 readLink 报 PHY 未就绪，
+     *           则完成断链清理后返回。
+     *         - InvalidPhyState：readLink 返回契约外的非 Ok 结果（已按断链清理）；或
+     *           readLink 成功但链路状态既非 Down/Negotiating 也非四种已知 Up 模式
+     *           （不继续配置，链路保持原样）。
+     *         - MacStopError：断链或模式切换需要停 MAC，但取锁或 HAL_ETH_Stop_IT
+     *           失败；不继续后续配置，停止失败优先上报而不被其它错误掩盖。
+     *         - MacStartError：获取/设置 MAC 配置、启动 MAC 或启动所需取锁失败；
+     *           链路保持 down。
+     *         本函数不重试，错误处理留给调用方。
      */
-    bool poll() noexcept;
+    [[nodiscard]] PollResult poll() noexcept;
 
     /**
      * @brief RX 线程入口：等待给定信号量，逐包经 HAL 读出并提交给 LwIP。
