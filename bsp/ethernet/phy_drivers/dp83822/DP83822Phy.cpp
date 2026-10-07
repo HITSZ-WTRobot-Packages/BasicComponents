@@ -81,6 +81,9 @@ constexpr std::uint16_t kRegPhyidr2 = 0x0003U; /* PHY 标识符 #2 */
 constexpr std::uint16_t kRegAnar    = 0x0004U; /* 自动协商通告 */
 constexpr std::uint16_t kRegCr1     = 0x0009U; /* PHY 控制 #1 */
 constexpr std::uint16_t kRegPhysts  = 0x0010U; /* PHY 状态 */
+constexpr std::uint16_t kRegPhyscr  = 0x0011U; /* PHY 特定控制（中断输出配置） */
+constexpr std::uint16_t kRegMisr1   = 0x0012U; /* MII 中断状态 #1：低字节使能、高字节状态（读清） */
+constexpr std::uint16_t kRegMisr2   = 0x0013U; /* MII 中断状态 #2：低字节使能、高字节状态（读清） */
 constexpr std::uint16_t kRegPhycr   = 0x0019U; /* PHY 控制 */
 constexpr std::uint16_t kRegPhyrcr  = 0x001FU; /* PHY 复位控制 */
 
@@ -117,8 +120,30 @@ constexpr std::uint16_t kPhycrAutoMdixEnable = 0x8000U; /* bit 15：Auto-MDIX */
 /* PHYRCR 位。 */
 constexpr std::uint16_t kPhyrcrSoftReset = 0x8000U; /* bit 15：等效硬件复位（W1S） */
 
+/*
+ * PHYSCR 位（数据手册 SNLS505H 表 8-17）：bit3 中断极性（1 = 中断时输出低），
+ * bit2 测试中断（写 1 会强制产生中断，必须始终为 0），bit1 事件中断使能，
+ * bit0 把 INT/PWDN_N 配置为中断输出。
+ */
+constexpr std::uint16_t kPhyscrInterruptActiveLow    = 0x0008U;
+constexpr std::uint16_t kPhyscrTestInterrupt         = 0x0004U;
+constexpr std::uint16_t kPhyscrInterruptEnable       = 0x0002U;
+constexpr std::uint16_t kPhyscrInterruptOutputEnable = 0x0001U;
+
+/*
+ * MISR1/MISR2（表 8-18/8-19）：低字节为各事件的中断使能，高字节为对应状态（读取即清除）。
+ * 本驱动只使能链路变化、速率变化、双工变化、协商完成四类事件。
+ */
+constexpr std::uint16_t kMisr1EventEnable = 0x003CU; /* bits5..2：链路/速率/双工/协商完成 */
+constexpr std::uint16_t kMisr1StatusMask  = 0x3C00U; /* bits13..10：上述四类事件的状态 */
+constexpr std::uint16_t kMisr2NoEvents    = 0x0000U; /* 关闭全部 MISR2 事件 */
+
 /* PHYRCR 软件复位自清零等待上限，单位 ms。 */
 constexpr std::uint32_t kResetTimeoutMs = 500U;
+
+/* RESET_N 引脚复位时序：拉低保持时间与释放后的建立时间，单位 ms（数据手册只要求 >= 10us）。 */
+constexpr std::uint32_t kResetPinLowMs     = 1U;
+constexpr std::uint32_t kResetPinReleaseMs = 2U;
 
 /* 全部受支持模式位，用于判定未知位与统计强制模式位数。 */
 constexpr std::uint8_t kKnownModeBits = static_cast<std::uint8_t>(
@@ -146,13 +171,32 @@ constexpr std::uint16_t anarAdvertisement(const bsp::ethernet_phy::PhyLinkMode m
             static_cast<std::uint16_t>(static_cast<std::uint8_t>(modes) & kKnownModeBits)
             << kAnarModeShift);
 }
+
+/* GPIO_t 的“未连接”唯一表示：port 与 pin 同时为空。 */
+constexpr bool gpioUnconnected(const GPIO_t& gpio) noexcept
+{
+    return (gpio.port == nullptr) && (gpio.pin == 0U);
+}
+
+/* 已提供的 GPIO 必须 port 非空且 pin 恰为单个 bit，否则视为非法配置。 */
+constexpr bool gpioSingleBit(const GPIO_t& gpio) noexcept
+{
+    return (gpio.port != nullptr) && (gpio.pin != 0U) &&
+           ((static_cast<std::uint32_t>(gpio.pin) & (static_cast<std::uint32_t>(gpio.pin) - 1U)) == 0U);
+}
 } // namespace
 
 namespace bsp::ethernet_phy
 {
 
-DP83822Phy::DP83822Phy(ETH_HandleTypeDef& eth, const std::uint32_t address) noexcept :
-    eth_(eth), requested_address_(address)
+DP83822Phy::DP83822Phy(ETH_HandleTypeDef& eth,
+                       const std::uint32_t address,
+                       const GPIO_t        reset_n,
+                       const GPIO_t        interrupt_n) noexcept :
+    eth_(eth),
+    requested_address_(address),
+    reset_n_(reset_n),
+    interrupt_n_(interrupt_n)
 {
     /* 只保存配置：不访问硬件、不产生总线流量、不会失败，可安全用于静态存储期对象。 */
 }
@@ -165,20 +209,32 @@ PhyResult DP83822Phy::start(const PhyLinkConfig& config) noexcept
     supported_modes_   = PhyLinkMode::None;
     autoneg_supported_ = false;
 
-    /* 地址与 config 形状非法必须在任何 HAL/MDIO 动作之前判定。 */
+    /* 地址、config 形状与 GPIO 引脚非法必须在任何 HAL/MDIO/引脚动作之前判定。 */
     PhyResult status = PhyResult::Ok;
     if ((requested_address_ != AutoAddress) && (requested_address_ > kAddressMax))
         status = PhyResult::InvalidArgument;
     if (status == PhyResult::Ok)
         status = validateConfig(config);
+    if (status == PhyResult::Ok)
+        status = validatePins(reset_n_, interrupt_n_);
 
     if (status == PhyResult::Ok)
     {
         HAL_ETH_SetMDIOClockRange(&eth_);
-        status = selectAddress();
+
+        /*
+         * RESET_N 提供时必须在任何 MDIO 探测之前释放引脚并等待建立时间；此时不再使用
+         * PHYRCR 复位，避免对同一芯片做两次完整复位。
+         */
+        if (hasResetPin())
+            pulseResetPin();
     }
     if (status == PhyResult::Ok)
-        status = resetAndConfigure();
+        status = selectAddress();
+    if (status == PhyResult::Ok)
+        status = softReset(); /* 提供 RESET_N 时空操作 */
+    if (status == PhyResult::Ok)
+        status = configureAutoMdix();
     if (status == PhyResult::Ok)
         status = readAndCacheCapabilities();
     /* 能力来自启动过程中读到的寄存器：此处 Unsupported 不保证此前没有写入。 */
@@ -186,6 +242,9 @@ PhyResult DP83822Phy::start(const PhyLinkConfig& config) noexcept
         status = validateConfigSupport(config);
     if (status == PhyResult::Ok)
         status = applyConfig(config);
+    /* 中断最后才打开：避免把启动过程中的配置写入当成链路事件上报。 */
+    if ((status == PhyResult::Ok) && hasInterruptPin())
+        status = configureInterrupt();
 
     if (status != PhyResult::Ok)
         address_ = 0U;
@@ -512,8 +571,50 @@ PhyResult DP83822Phy::selectAddress() noexcept
     return PhyResult::Ok;
 }
 
-PhyResult DP83822Phy::resetAndConfigure() noexcept
+PhyResult DP83822Phy::validatePins(const GPIO_t& reset_n, const GPIO_t& interrupt_n) noexcept
 {
+    /* {} 是唯一的“未连接”表示：只有 port/pin 同时为空才算未连接。 */
+    if (!gpioUnconnected(reset_n) && !gpioSingleBit(reset_n))
+        return PhyResult::InvalidArgument;
+    if (!gpioUnconnected(interrupt_n) && !gpioSingleBit(interrupt_n))
+        return PhyResult::InvalidArgument;
+
+    /* 同一条物理引脚不能既做复位又做中断。 */
+    if (gpioSingleBit(reset_n) && gpioSingleBit(interrupt_n) && reset_n.port == interrupt_n.port &&
+        reset_n.pin == interrupt_n.pin)
+        return PhyResult::InvalidArgument;
+
+    return PhyResult::Ok;
+}
+
+bool DP83822Phy::hasResetPin() const noexcept
+{
+    return gpioSingleBit(reset_n_);
+}
+
+bool DP83822Phy::hasInterruptPin() const noexcept
+{
+    return gpioSingleBit(interrupt_n_);
+}
+
+void DP83822Phy::pulseResetPin() noexcept
+{
+    /*
+     * RESET_N 低有效复位输入：拉低至少 1ms 后释放，再等待 2ms 让内部 PLL/strap 建立，
+     * 之后才允许 MDIO 访问。引脚在复位后保持高电平，本驱动不在其它时机驱动它。
+     */
+    HAL_GPIO_WritePin(reset_n_.port, reset_n_.pin, GPIO_PIN_RESET);
+    HAL_Delay(kResetPinLowMs);
+    HAL_GPIO_WritePin(reset_n_.port, reset_n_.pin, GPIO_PIN_SET);
+    HAL_Delay(kResetPinReleaseMs);
+}
+
+PhyResult DP83822Phy::softReset() noexcept
+{
+    /* RESET_N 已做过引脚复位时不再叠加 PHYRCR 复位，避免双重复位并延长启动时间。 */
+    if (hasResetPin())
+        return PhyResult::Ok;
+
     std::uint16_t phyrcr = 0U;
 
     /*
@@ -542,12 +643,97 @@ PhyResult DP83822Phy::resetAndConfigure() noexcept
             return PhyResult::ResetTimeout;
     }
 
+    return PhyResult::Ok;
+}
+
+PhyResult DP83822Phy::configureAutoMdix() noexcept
+{
     /* 复位清空了寄存器配置，重新应用默认的 Auto-MDIX 配置。 */
-    status = setRegisterBits(kRegPhycr, kPhycrAutoMdixEnable);
+    PhyResult status = setRegisterBits(kRegPhycr, kPhycrAutoMdixEnable);
     if (status != PhyResult::Ok)
         return status;
 
     return setRegisterBits(kRegCr1, kCr1RobustAutoMdix);
+}
+
+PhyResult DP83822Phy::configureInterrupt() noexcept
+{
+    std::uint16_t scratch = 0U;
+
+    /*
+     * 先清掉两个 MISR 里可能残留的 pending 状态（读取即清除），否则使能 PHYSCR 中断输出的
+     * 瞬间会把启动前的旧事件当成一次中断上报。
+     */
+    PhyResult status = readRegister(kRegMisr1, scratch);
+    if (status != PhyResult::Ok)
+        return status;
+    status = readRegister(kRegMisr2, scratch);
+    if (status != PhyResult::Ok)
+        return status;
+
+    /* MISR2 的事件全部关闭：本驱动只关心链路/速率/双工/协商完成。 */
+    if (writeRegister(kRegMisr2, kMisr2NoEvents) != PhyResult::Ok)
+        return failAfterWrite();
+
+    /* 只使能 MISR1 中链路/速率/双工/协商完成四类事件（低字节使能，高字节为读清状态）。 */
+    if (writeRegister(kRegMisr1, kMisr1EventEnable) != PhyResult::Ok)
+        return failAfterWrite();
+
+    /*
+     * PHYSCR：置 active-low 中断极性、事件中断使能，并把 INT/PWDN_N 配成中断输出；
+     * bit2 的测试中断会强制拉中断，必须显式清零且永远不置位。
+     */
+    std::uint16_t physcr = 0U;
+    status               = readRegister(kRegPhyscr, physcr);
+    if (status != PhyResult::Ok)
+        return status;
+
+    const std::uint16_t desired = static_cast<std::uint16_t>(
+            (physcr & static_cast<std::uint16_t>(~kPhyscrTestInterrupt)) |
+            kPhyscrInterruptActiveLow | kPhyscrInterruptEnable | kPhyscrInterruptOutputEnable);
+
+    if (writeRegister(kRegPhyscr, desired) != PhyResult::Ok)
+        return failAfterWrite();
+
+    return PhyResult::Ok;
+}
+
+bool DP83822Phy::usesInterrupt() const noexcept
+{
+    return hasInterruptPin();
+}
+
+bool DP83822Phy::interruptAsserted() const noexcept
+{
+    if (!hasInterruptPin())
+        return false;
+
+    /* INT/PWDN_N 为 active-low 电平输出：低表示仍有未清除的中断事件。 */
+    return HAL_GPIO_ReadPin(interrupt_n_.port, interrupt_n_.pin) == GPIO_PIN_RESET;
+}
+
+PhyResult DP83822Phy::acknowledgeInterrupt(bool& link_changed) noexcept
+{
+    if (status_ != PhyResult::Ok)
+        return PhyResult::NotInitialized;
+
+    if (!hasInterruptPin())
+        return PhyResult::Unsupported;
+
+    /* 读取 MISR1/MISR2 即清除各自的 pending 状态；两次都成功才更新输出。 */
+    std::uint16_t misr1  = 0U;
+    PhyResult     status = readRegister(kRegMisr1, misr1);
+    if (status != PhyResult::Ok)
+        return status;
+
+    /* MISR2 的事件在 start() 中已全部禁用，这里只读取以清除其 pending。 */
+    std::uint16_t misr2 = 0U;
+    status              = readRegister(kRegMisr2, misr2);
+    if (status != PhyResult::Ok)
+        return status;
+
+    link_changed = (misr1 & kMisr1StatusMask) != 0U;
+    return PhyResult::Ok;
 }
 
 PhyResult DP83822Phy::readAndCacheCapabilities() noexcept
