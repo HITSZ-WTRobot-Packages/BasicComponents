@@ -7,44 +7,38 @@
  * 职责边界：
  *   - 只通过借用的 IPhy& 启动 PHY、查询链路并切换 MAC 速度/双工；不依赖具体 PHY
  *     类型、地址、MDIO 总线或板级 MSP，器件复位与寄存器配置由具体 PHY 驱动负责。
- *   - 不实现自动重试、遥测或工程错误处理策略；prepare/init 返回 false、poll 返回非
- *     Ok 时由调用方决定处理流程。
- *   - 不拥有 ETH 句柄、PHY、netif 或 RX 信号量；这些由调用方创建并保证生命周期覆盖
- *     接收线程与链路线程的全部运行期。
+ *   - 不实现自动重试、遥测或工程错误处理策略；init 返回 false、poll 返回非 Ok 时
+ *     由调用方决定处理流程。
+ *   - 不拥有 ETH 句柄、PHY 或 netif；这些由调用方创建并保证生命周期覆盖线路线程的
+ *     全部运行期。
  *
  * 生命周期与所有权：
  *   - 构造只保存引用并初始化成员，不访问 HAL、PHY 或 RTOS，不产生总线流量，不失败；
  *     因此可安全地声明为静态存储期对象。
- *   - 借用 eth 与 phy 必须在其整个使用期内有效；对象不被拷贝/移动（静态 mutex 控制块
- *     地址属于本实例），也不提供 shutdown 或运行期替换 PHY。
+ *   - 借用 eth 与 phy 必须在其整个使用期内有效；对象不被拷贝/移动，也不提供 shutdown
+ *     或运行期替换 PHY。
  *   - 析构不销毁 PHY、不停止 MAC、不操作 RTOS。
  *
  * 锁序与并发：
- *   - 固定锁序为 LwIP core lock → 本实例 RX 互斥体。
+ *   - MAC 转换（Get/Set/Start/Stop）与 netif link 变更统一在 LwIP core lock 内完成；
+ *     本类不持有任何自身互斥体。
  *   - PHY 的 start()/readLink() 始终在 core lock 外调用。
- *   - MAC 转换（Get/Set/Start/Stop）同时受 core lock 与 RX 互斥体保护；input() 在 RX
- *     互斥体内直接执行 HAL_ETH_ReadData，netif link 变更、netif->input/pbuf_free 均在
- *     RX 互斥体外。
- *   - output() 由 LwIP 在 core lock 内调用，自身不再获取 core lock。
- *   - init()/poll() 只由同一 EthLink 线程串行调用，不得并发。
+ *   - init()/poll()/releaseTxPackets() 只由同一 EthLink 线程串行调用，不得并发。
  *
  * 编译前提：
+ *   - 调用方须先调用 HAL_ETH_Init 完成 MAC 外设初始化；本类不初始化 MAC 外设。
  *   - 依赖 LWIP_TCPIP_CORE_LOCKING=1（在 .cpp 中以 #error 强制）。
  */
 #pragma once
 
-#include "FreeRTOS.h"
 #include "IPhy.hpp"
 
-#include "cmsis_os2.h"
-#include "lwip/err.h"
 #include "main.h"
 
 #include <cstdint>
 
 /* LwIP 类型前置声明：必须位于全局命名空间，避免在 bsp::ethernet_phy 内引入同名新类型。 */
 struct netif;
-struct pbuf;
 
 namespace bsp::ethernet_phy
 {
@@ -59,8 +53,8 @@ enum class PollResult : std::uint8_t
 {
     Ok,              ///< 本轮链路状态已成功应用，含正常断链、协商及 MAC 启动成功。
     PhyReadError,    ///< readLink 寄存器读取失败；已按断链清理，下一轮可重试。
-    MacStopError,    ///< 需要停止 MAC 但取锁或 HAL_ETH_Stop_IT 失败；不谎称已停。
-    MacStartError,   ///< 获取/设置 MAC 配置、启动 MAC 或启动所需取锁失败；链路保持 down。
+    MacStopError,    ///< 需要停止 MAC 但 HAL_ETH_Stop_IT 失败；不谎称已停。
+    MacStartError,   ///< 获取/设置 MAC 配置或启动 MAC 失败；链路保持 down。
     NotInitialized,  ///< 本对象未 init，或 readLink 报 PHY 未就绪；后者已按断链清理。
     InvalidPhyState, ///< readLink 返回契约外结果，或返回未知链路状态；不继续配置。
 };
@@ -87,20 +81,15 @@ public:
     LwipPlatform& operator=(LwipPlatform&&)      = delete;
 
     /**
-     * @brief 创建本实例的静态 RX 互斥体；不注册 MSP、不启动 PHY。
-     * @return true 已就绪（可重复调用，幂等）；false 互斥体创建失败，调用方须终止初始化。
-     */
-    bool prepare() noexcept;
-
-    /**
      * @brief 一次性初始化：绑定 netif、置 link down，并把 config 原样交给 PHY 启动。
      *
+     * 前置：调用方已调用 HAL_ETH_Init 完成 MAC 外设初始化；本类不初始化 MAC 外设。
      * config 被原样传递给 phy_.start()；本类不覆盖调用方配置，也不静默取能力交集，
      * 不支持的模式由具体 IPhy::start 报错并令本函数返回 false。
      *
      * @param[in] netif 已建立的 LwIP 接口，仅借用，不拥有。
      * @param[in] config 期望的链路配置，原样传递。
-     * @return true 平台可用于 poll；false（未 prepare、重复 init 或 PHY 启动失败）。
+     * @return true 平台可用于 poll；false（重复 init 或 PHY 启动失败）。
      */
     bool init(struct netif& netif, const PhyLinkConfig& config) noexcept;
 
@@ -119,48 +108,33 @@ public:
      *         - InvalidPhyState：readLink 返回契约外的非 Ok 结果（已按断链清理）；或
      *           readLink 成功但链路状态既非 Down/Negotiating 也非四种已知 Up 模式
      *           （不继续配置，链路保持原样）。
-     *         - MacStopError：断链或模式切换需要停 MAC，但取锁或 HAL_ETH_Stop_IT
-     *           失败；不继续后续配置，停止失败优先上报而不被其它错误掩盖。
-     *         - MacStartError：获取/设置 MAC 配置、启动 MAC 或启动所需取锁失败；
-     *           链路保持 down。
+     *         - MacStopError：断链或模式切换需要停 MAC，但 HAL_ETH_Stop_IT 失败；
+     *           不继续后续配置，停止失败优先上报而不被其它错误掩盖。
+     *         - MacStartError：获取/设置 MAC 配置或启动 MAC 失败；链路保持 down。
      *         本函数不重试，错误处理留给调用方。
      */
     [[nodiscard]] PollResult poll() noexcept;
 
     /**
-     * @brief RX 线程入口：等待给定信号量，逐包经 HAL 读出并提交给 LwIP。
+     * @brief 只回收已完成 TX：在 core lock 内调用 HAL_ETH_ReleaseTxPacket，不读取 PHY。
      *
-     * 每轮在 RX 互斥体内直接调用 HAL_ETH_ReadData，取得 pbuf 后立即释放互斥体，
-     * 再在锁外调用 netif.input；提交失败时在锁外 pbuf_free 该包。HAL 报告无包
-     * （或 MAC 未启动）时结束本轮并回到信号量等待。RX pool 耗尽后，外部的 pbuf
-     * 回收回调须唤醒 RX 信号量，使 HAL 重新补充描述符；本函数不忙等可用缓冲。
+     * 供 TX 完成通知路径复用：事件线程被 TX 完成中断唤醒后调用本函数，即可释放
+     * 最后一次发送占用的描述符与 pbuf 引用，而不产生任何 MDIO 流量、不改变链路
+     * 状态。与 poll() 不同，本函数不查询 PHY、不切换 MAC，可在纯 TX 事件下单独调用。
      *
-     * 未 prepare、信号量为空或 netif.input 为空时直接返回，不访问 HAL；
-     * 本函数不创建/删除任务或信号量，不得从 ISR 调用。
+     * 前置：由 EthLink 线程调用（需要 core lock，不可在 ISR 中调用），且不得与 init()/
+     * poll() 并发。未 init 时无任何硬件动作直接返回。
      */
-    void input(struct netif& netif, osSemaphoreId_t rx_semaphore);
-
-    /**
-     * @brief 发送一个 pbuf 给 MAC，非阻塞、不等待也不重试。
-     *
-     * 前置：调用者持 LwIP core lock（本函数不再获取 core lock，只会按需回收已完成
-     * TX）；netif 已绑定、link 为 up、MAC 与 HAL 均处于 STARTED。
-     *
-     * pbuf 链长不得超过 ETH_TX_DESC_CNT；不分配/拷贝 payload。先回收已完成
-     * TX，再对 p 做一次 pbuf_ref，成功提交 HAL_ETH_Transmit_IT 后由 TxFree 回调
-     * 释放本次引用；失败立即 pbuf_free 撤销本次引用。描述符 BUSY 时立即返回 ERR_BUF，
-     * 不做任何等待。未就绪、链过长或 HAL 未启动返回 ERR_IF；p 为空返回 ERR_IF。
-     */
-    err_t output(struct netif& netif, struct pbuf* p);
+    void releaseTxPackets() noexcept;
 
 private:
     /** @brief 在 core lock 内置链路为 down（幂等）。 */
     void setLinkDownLocked() noexcept;
 
     /**
-     * @brief 停止 MAC；前置：已持 core lock，内部获取/释放 RX 互斥体。
-     * @return true 已停止或本就未启动；false 取锁失败或 HAL_ETH_Stop_IT 失败，
-     *         此时保留 mac_started_（停止失败不得谎称已停）。
+     * @brief 停止 MAC；前置：已持 core lock。
+     * @return true 已停止或本就未启动；false HAL_ETH_Stop_IT 失败，此时保留
+     *         mac_started_（停止失败不得谎称已停）。
      */
     bool stopMacLocked() noexcept;
 
@@ -173,13 +147,10 @@ private:
     ETH_HandleTypeDef& eth_; ///< 借用，不拥有。
     IPhy&              phy_; ///< 借用，不拥有。
 
-    StaticSemaphore_t rx_mutex_storage_{}; ///< 本实例静态互斥体控制块。
-    osMutexId_t       rx_mutex_{ nullptr };
-    bool              prepared_{ false };
-    bool              initialized_{ false };
-    bool              init_attempted_{ false };
-    bool              mac_started_{ false };
-    struct netif*     bound_netif_{ nullptr };
+    bool          initialized_{ false };
+    bool          init_attempted_{ false };
+    bool          mac_started_{ false };
+    struct netif* bound_netif_{ nullptr };
     /* 最近一次成功提交的 MAC 链路模式；仅当 mac_started_ 时有效。 */
     PhyLinkState applied_state_{ PhyLinkState::Down };
 };

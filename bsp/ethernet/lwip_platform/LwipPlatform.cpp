@@ -4,19 +4,16 @@
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
- * 锁序固定为 LwIP core lock → 本实例 RX 互斥体，且 PHY 的 start()/readLink() 始终在锁外：
- *   - core lock 保护 netif link 变更与 MAC 转换（Get/Set/Start/Stop）。
- *   - RX 互斥体额外串行化 MAC 转换与 input() 的底层 HAL_ETH_ReadData。
- *   - netif_set_link_down 在取得 RX 互斥体之前执行，netif_set_link_up 在释放之后执行，
- *     避免 link 回调内发送数据造成重入。
- * 发送路径 output() 由 LwIP 在 core lock 内调用，非阻塞、不重试，TX 描述符回收交由
- * 本函数的开头与 poll() 在 core lock 内完成。
+ * 锁序：netif link 变更与 MAC 转换（Get/Set/Start/Stop）统一在 LwIP core lock 内完成，
+ * 且 PHY 的 start()/readLink() 始终在锁外调用；本类不持有任何自身互斥体。
+ * TX 描述符回收在 core lock 内完成：poll() 每轮回收已完成 TX，releaseTxPackets() 另外
+ * 提供只回收 TX、不查询 PHY 的入口，供 TX 完成事件线程复用，避免最后一次发送的 pbuf
+ * 引用滞留。
  */
 #include "LwipPlatform.hpp"
 
 #include "lwip/netif.h"
 #include "lwip/opt.h"
-#include "lwip/pbuf.h"
 #include "lwip/tcpip.h"
 
 #include <cstdint>
@@ -64,27 +61,9 @@ LwipPlatform::LwipPlatform(ETH_HandleTypeDef& eth, IPhy& phy) noexcept
 {
 }
 
-bool LwipPlatform::prepare() noexcept
-{
-    if (prepared_)
-        return true;
-
-    if (rx_mutex_ == nullptr)
-    {
-        const osMutexAttr_t attr = {
-            "ethRx", osMutexPrioInherit, &rx_mutex_storage_, sizeof(rx_mutex_storage_)};
-        rx_mutex_ = osMutexNew(&attr);
-        if (rx_mutex_ == nullptr)
-            return false;
-    }
-
-    prepared_ = true;
-    return true;
-}
-
 bool LwipPlatform::init(struct netif& netif, const PhyLinkConfig& config) noexcept
 {
-    if (!prepared_ || init_attempted_)
+    if (init_attempted_)
         return false;
 
     init_attempted_ = true;
@@ -171,7 +150,7 @@ PollResult LwipPlatform::poll() noexcept
 
     mac_started_   = true;
     applied_state_ = state;
-    /* netif link up 在释放 RX 互斥体后、仍持 core lock 时报告。 */
+    /* netif link up 在仍持 core lock 时报告。 */
     if (bound_netif_ != nullptr && netif_is_link_up(bound_netif_) == 0U)
         netif_set_link_up(bound_netif_);
 
@@ -179,84 +158,14 @@ PollResult LwipPlatform::poll() noexcept
     return PollResult::Ok;
 }
 
-void LwipPlatform::input(struct netif& netif, osSemaphoreId_t rx_semaphore)
+void LwipPlatform::releaseTxPackets() noexcept
 {
-    if (!prepared_ || rx_mutex_ == nullptr || rx_semaphore == nullptr ||
-        netif.input == nullptr)
-        return;
+    if (!initialized_)
+        return; /* 未 init：不得触碰 HAL 描述符或调用 TxFree 回调。 */
 
-    for (;;)
-    {
-        if (osSemaphoreAcquire(rx_semaphore, osWaitForever) != osOK)
-            continue;
-
-        /* 本轮持续读取，直到 HAL 报告无包/MAC 未启动或取锁失败。 */
-        for (;;)
-        {
-            if (osMutexAcquire(rx_mutex_, osWaitForever) != osOK)
-                break;
-
-            void* received = nullptr;
-            const HAL_StatusTypeDef status = HAL_ETH_ReadData(&eth_, &received);
-            (void)osMutexRelease(rx_mutex_);
-
-            if (status != HAL_OK || received == nullptr)
-                break;
-
-            /* 交包和释放 pbuf 均在 RX 锁外，避免重入接收路径。 */
-            struct pbuf* packet = static_cast<struct pbuf*>(received);
-            if (netif.input(packet, &netif) != ERR_OK)
-                pbuf_free(packet);
-        }
-    }
-}
-
-err_t LwipPlatform::output(struct netif& netif, struct pbuf* p)
-{
-    if (!prepared_ || !initialized_ || bound_netif_ != &netif || p == nullptr)
-        return ERR_IF;
-
-    if (netif_is_link_up(&netif) == 0U || !mac_started_)
-        return ERR_IF;
-
-    /* MAC 停止或 HAL 出错时不再提交描述符。 */
-    if (eth_.gState != HAL_ETH_STATE_STARTED)
-        return ERR_IF;
-
-    ETH_BufferTypeDef         tx_buffers[ETH_TX_DESC_CNT] = {};
-    ETH_TxPacketConfigTypeDef tx_config                   = {};
-
-    /* 保持原链长上限；超限时尚未提交 HAL，也未增加 pbuf 引用。 */
-    std::uint32_t i = 0U;
-    for (struct pbuf* q = p; q != nullptr; q = q->next)
-    {
-        if (i >= ETH_TX_DESC_CNT)
-            return ERR_IF;
-
-        tx_buffers[i].buffer = static_cast<std::uint8_t*>(q->payload);
-        tx_buffers[i].len    = q->len;
-        if (i > 0U)
-            tx_buffers[i - 1U].next = &tx_buffers[i];
-        ++i;
-    }
-
-    tx_config.Attributes   = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
-    tx_config.ChecksumCtrl = ETH_CHECKSUM_IPHDR_PAYLOAD_INSERT_PHDR_CALC;
-    tx_config.CRCPadCtrl   = ETH_CRC_PAD_INSERT;
-    tx_config.Length       = p->tot_len;
-    tx_config.TxBuffer     = tx_buffers;
-    tx_config.pData        = p;
-
-    /* 先回收已完成 TX（调用其 TxFree 回调），再为本包增加一次引用。 */
+    LOCK_TCPIP_CORE();
     (void)HAL_ETH_ReleaseTxPacket(&eth_);
-
-    pbuf_ref(p);
-    if (HAL_ETH_Transmit_IT(&eth_, &tx_config) == HAL_OK)
-        return ERR_OK;
-
-    /* 撤销本次引用；用 gState 区分提交期状态错误与描述符 BUSY（不读被 IRQ 更新的 ErrorCode）。 */
-    pbuf_free(p);
-    return (eth_.gState == HAL_ETH_STATE_STARTED) ? ERR_BUF : ERR_IF;
+    UNLOCK_TCPIP_CORE();
 }
 
 void LwipPlatform::setLinkDownLocked() noexcept
@@ -270,11 +179,7 @@ bool LwipPlatform::stopMacLocked() noexcept
     if (!mac_started_)
         return true;
 
-    if (osMutexAcquire(rx_mutex_, osWaitForever) != osOK)
-        return false;
-
     const bool stopped = (HAL_ETH_Stop_IT(&eth_) == HAL_OK);
-    (void)osMutexRelease(rx_mutex_);
 
     if (stopped)
         mac_started_ = false;
@@ -283,9 +188,6 @@ bool LwipPlatform::stopMacLocked() noexcept
 
 bool LwipPlatform::startMacLocked(std::uint32_t speed, std::uint32_t duplex) noexcept
 {
-    if (osMutexAcquire(rx_mutex_, osWaitForever) != osOK)
-        return false;
-
     ETH_MACConfigTypeDef mac_config{};
     bool                 ok = (HAL_ETH_GetMACConfig(&eth_, &mac_config) == HAL_OK);
     if (ok)
@@ -298,7 +200,6 @@ bool LwipPlatform::startMacLocked(std::uint32_t speed, std::uint32_t duplex) noe
     if (ok)
         ok = (HAL_ETH_Start_IT(&eth_) == HAL_OK);
 
-    (void)osMutexRelease(rx_mutex_);
     return ok;
 }
 
