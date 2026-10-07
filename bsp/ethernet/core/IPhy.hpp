@@ -90,11 +90,26 @@ struct PhyCapabilities
 };
 
 /**
+ * @brief 链路事件硬件回调：由具体 PHY 在触发 INT 的 ISR 上下文中调用。
+ *
+ * @param[in] context 注册时传入的上下文指针（见 setLinkEventCallback）。
+ *
+ * 回调只表示“需要处理一个事件”，不承诺已确认链路变化，也不保证事件仍在 pending。回调
+ * 可能在 ISR 中执行，因此实现必须保持极短且不得访问 MDIO；可调用该上下文允许的通知 API
+ * 唤醒线程，真正的读取、确认与状态转换在线程上下文中完成。
+ */
+using LinkEventCallback = void (*)(void* context) noexcept;
+
+/**
  * @brief 调用方持有的 PHY 对象接口。
  *
  * 上层仅借用 IPhy&，不得通过基类指针销毁对象；具体对象由调用方按其具体类型管理，
  * 上层不拥有其生命周期。接口不接管 ETH MAC、协议栈或外设生命周期，不需要动态分配、
  * 异常、RTTI 或运行时驱动注册。
+ *
+ * 线程归属：本接口不创建、拥有或管理任何线程/任务，也不提供线程 stop/join 操作，不依赖
+ * RTOS；生命周期由调用方控制。接口只提供可选的“链路事件”硬件通知（setLinkEventCallback
+ * 与 interruptAsserted/acknowledgeInterrupt），是否真正接线到某条中断由具体实现决定。
  *
  * 生命周期：
  *  - 构造函数只保存配置（借用引用与地址），不访问硬件、不产生总线流量、不会失败；
@@ -105,8 +120,9 @@ struct PhyCapabilities
  *  - start() 可重复调用，每次都会丢弃此前配置并按传入 config 完整重建；运行期写失败后
  *    再次调用 start(config) 即可恢复，无需销毁重建。
  *
- * 所有操作均由调用方串行化；接口不提供锁、线程、定时器、中断或后台重试。status() != Ok
- * 时，所有操作方法一律返回 NotInitialized，不访问总线、不改动输出参数。
+ * 所有总线操作均由调用方串行化；接口不提供锁、后台线程、定时器或自动重试。唯一允许的
+ * 异步入口是 setLinkEventCallback 注册的事件回调，它可能从 ISR 触发，只应唤醒调用方的
+ * 线程。status() != Ok 时，总线操作方法一律返回 NotInitialized，不访问总线、不改动输出。
  */
 class IPhy
 {
@@ -171,6 +187,44 @@ public:
      *         ReadError 读取 BMCR 失败（对象仍就绪）；WriteError 写入失败且对象转为未就绪。
      */
     [[nodiscard]] virtual PhyResult restartAutoNegotiation() noexcept = 0;
+
+    /**
+     * @brief 注册/更新链路事件回调；可在 start() 之前调用。
+     *
+     * 具体 PHY 在提供 INT 引脚时，把该回调挂到引脚事件源（例如 EXTI）上；回调可能在 ISR
+     * 中触发，实现只通知“有事件需要处理”，不访问 MDIO。传入 nullptr 表示关闭通知；
+     * callback/context 的更新不改变 PHY 配置、不产生总线流量、不会失败。
+     *
+     * 更新 callback 与 context 必须是原子的（要么观察到旧组合、要么观察新组合），以便 ISR
+     * 不会读到半配置状态。未提供 INT 的实现可以只保存参数而永不触发。
+     *
+     * @param[in] callback 事件回调；nullptr 关闭通知。
+     * @param[in] context  回调上下文，原样回传给 callback。
+     */
+    virtual void setLinkEventCallback(LinkEventCallback callback, void* context) noexcept = 0;
+
+    /**
+     * @brief 配置是否包含可用的中断事件源（INT 引脚）。
+     * @return true 表示本对象配置了 INT，事件回调与 acknowledgeInterrupt() 可用；否则 false。
+     * @note 只反映配置，不访问硬件。
+     */
+    [[nodiscard]] virtual bool usesInterrupt() const noexcept = 0;
+
+    /**
+     * @brief 采样中断线电平，判断事件是否仍处于 pending。
+     * @return 配置了 INT 时为 true 表示中断线仍有效（active-low 为低）；未配置时为 false。
+     * @note 只读取引脚，不访问 MDIO，可在任意上下文调用。
+     */
+    [[nodiscard]] virtual bool interruptAsserted() const noexcept = 0;
+
+    /**
+     * @brief 确认（读取并清除）PHY 事件源，报告是否有链路相关事件。
+     * @param[out] link_changed 仅在返回 Ok 时更新；失败时保持原值。
+     * @return NotInitialized 表示尚未成功 start()；Unsupported 表示未配置 INT，无事件可确认；
+     *         其它值为确认过程中的读取失败原因。
+     * @note 可能访问 MDIO，只能在线程上下文调用，不得在 ISR 中调用。
+     */
+    [[nodiscard]] virtual PhyResult acknowledgeInterrupt(bool& link_changed) noexcept = 0;
 
 protected:
     ~IPhy() = default;

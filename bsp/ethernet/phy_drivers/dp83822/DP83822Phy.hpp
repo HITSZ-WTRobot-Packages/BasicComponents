@@ -13,6 +13,7 @@
 
 #include "IPhy.hpp"
 #include "gpio_driver.h"
+#include "gpio_driver.hpp"
 
 #include "main.h"
 
@@ -30,7 +31,8 @@ namespace bsp::ethernet_phy
 // 生命周期与所有权：
 //   - 调用者必须先完成 HAL_ETH_Init；本类不初始化 ETH/MAC，也不控制 MAC。
 //   - eth 句柄为借用引用，其生命周期必须覆盖本对象的全部使用期；本类不拥有它。
-//   - 本类自身不可拷贝、不可移动；析构不访问硬件，PHY 与 ETH 均保持原状。
+//   - 本类自身不可拷贝、不可移动；析构只撤销软件 EXTI 回调注册，不访问硬件（无 MDIO、无
+//     引脚动作），PHY 与 ETH 均保持原状。
 //   - 构造函数只保存配置（含可选 GPIO），不访问硬件、不产生总线流量、不会失败；因此可安全
 //     声明为静态存储期对象，构造顺序不受 HAL 初始化影响。
 //   - 会失败的启动集中在 start(config)：必须在 HAL_ETH_Init 完成、MDIO 时钟与 HAL_GetTick()
@@ -43,13 +45,17 @@ namespace bsp::ethernet_phy
 //     start() 在任何硬件动作（总线访问与引脚电平变化）之前返回 InvalidArgument。
 //   - 引脚的时钟、方向与模式（RESET_N 推挽输出；INT_PWDN_N 输入上拉 + 下降沿 EXTI）、NVIC
 //     使能与中断优先级（须 >= 5，以便中断里调用 RTOS 线程级 API）全部由板级/CubeMX 配置；
-//     本类既不初始化引脚，也不注册 EXTI 回调。
+//     本类不初始化引脚，也不改动 NVIC。提供 INT 且 start() 成功后，本类会把软件 EXTI 回调
+//     （bsp::gpio::RegisterExtiCallback，user_data 指向自身）注册到 gpio_driver 的分发器；
+//     每次 start() 先撤销自身旧注册、失败不留下注册，析构时也撤销注册。
 //   - RESET_N 提供时，start() 先拉低至少 1ms、再释放并等待至少 2ms，之后才进行 MDIO 探测，
 //     并且不再触发 PHYRCR 软复位；未提供时保留原 PHYRCR 软复位并等待其自清零。启动结束后
 //     RESET_N 保持高电平，本类不在其它时机驱动它。
 //   - INT_PWDN_N 提供时，start() 成功返回前把 PHY 配置为 active-low 中断输出，且只使能
-//     链路/速率/双工/协商完成四类事件（PHYSCR 的测试中断位始终保持清零）。此后可在线程上下文
-//     调用 acknowledgeInterrupt() 读取并清除 MISR，再用 interruptAsserted() 判断中断线电平。
+//     链路/速率/双工/协商完成四类事件（PHYSCR 的测试中断位始终保持清零）；成功后本类注册
+//     软件 EXTI 回调，事件到达时通过已保存的 setLinkEventCallback 回调通知（可能在 ISR 中，
+//     只通知、不访问 MDIO）。此后可在线程上下文调用 acknowledgeInterrupt() 读取并清除 MISR，
+//     再用 interruptAsserted() 判断中断线电平。
 //
 // 并发与初始化前提：
 //   - 同一 MDIO 资源上必须串行使用，调用者负责串行化；本类不提供锁或重试。MDIO 访问只能在
@@ -132,8 +138,17 @@ public:
      */
     [[nodiscard]] PhyResult start(const PhyLinkConfig& config) noexcept override;
 
-    /** @brief 析构不访问硬件；PHY 与 ETH 均保持原状。 */
-    ~DP83822Phy() = default;
+    /** @brief 析构只撤销软件 EXTI 回调注册；不访问硬件（无 MDIO、无引脚动作）。 */
+    ~DP83822Phy() noexcept;
+
+    /**
+     * @brief 注册/更新链路事件回调；可在 start() 之前调用。
+     *
+     * 只保存 callback 与 context（以短临界区原子更新，避免 ISR 读到半配置），不注册或修改
+     * EXTI、不改变 PHY 配置、不访问硬件。传入 nullptr 关闭通知。真正的事件源注册由 start()
+     * 在成功配置 INT 输出后完成；未提供 INT 时本方法只保存参数而永不触发。
+     */
+    void setLinkEventCallback(LinkEventCallback callback, void* context) noexcept override;
 
     DP83822Phy(const DP83822Phy&)            = delete;
     DP83822Phy& operator=(const DP83822Phy&) = delete;
@@ -188,7 +203,7 @@ public:
      * @return true 表示 start() 会配置 PHY 中断输出，且 acknowledgeInterrupt() 可用。
      * @note 只反映配置，不访问硬件。
      */
-    [[nodiscard]] bool usesInterrupt() const noexcept;
+    [[nodiscard]] bool usesInterrupt() const noexcept override;
 
     /**
      * @brief 采样 INT_PWDN_N 电平，判断中断线当前是否仍被拉低。
@@ -196,7 +211,7 @@ public:
      * @note 只读取 GPIO，不访问 MDIO，可在任意上下文调用。中断为电平有效：只要还有未清除的
      *       事件该值就为 true，读取并清除 MISR 之后才会回到无效电平。
      */
-    [[nodiscard]] bool interruptAsserted() const noexcept;
+    [[nodiscard]] bool interruptAsserted() const noexcept override;
 
     /**
      * @brief 读取并清除 PHY 中断状态（MISR1/MISR2），报告是否有链路相关事件。
@@ -208,7 +223,7 @@ public:
      * @note 必须在线程上下文调用：需要 MDIO 串行访问，不得在 ISR 中调用。调用后应重新读取
      *       链路状态（readLink()）；本方法只报告“有事件”，不解码当前状态。
      */
-    [[nodiscard]] PhyResult acknowledgeInterrupt(bool& link_changed) noexcept;
+    [[nodiscard]] PhyResult acknowledgeInterrupt(bool& link_changed) noexcept override;
 
 private:
     /** @brief 纯 config 形状校验：空掩码、未知位或强制多模式 → InvalidArgument；不访问硬件。 */
@@ -246,10 +261,23 @@ private:
     /** @brief 写失败后使对象失效（status_ = WriteError、address_ = 0）；可被下一次 start() 清除。 */
     PhyResult failAfterWrite() noexcept;
 
+    /**
+     * @brief gpio_driver EXTI 分发器入口（可能运行在 ISR）；只转发事件，不访问 MDIO/RTOS。
+     *
+     * 从 gpio->user_data 取回本实例；仅在已保存的回调非空时以保存的 context 调用它。回调中
+     * 不得做耗时或阻塞操作，只用于通知线程有链接/PHY 事件需要处理。
+     */
+    static void onInterrupt(const bsp::gpio::GpioPinInput* gpio, std::uint32_t counter) noexcept;
+
     ETH_HandleTypeDef&  eth_;               /**< 借用的 ETH 句柄，生命周期由调用者保证。 */
     const std::uint32_t requested_address_; /**< 构造时固定的 PHY 地址或 AutoAddress。 */
     const GPIO_t        reset_n_;           /**< 可选 RESET_N 引脚；{} 表示未连接。 */
     const GPIO_t        interrupt_n_;       /**< 可选 INT_PWDN_N 引脚；{} 表示未连接。 */
+    /** @brief interrupt_n_ 的 C++ 句柄（user_data = this），用于向 gpio_driver 注册 EXTI。 */
+    bsp::gpio::GpioPinInput interrupt_input_{nullptr, 0U, nullptr};
+    LinkEventCallback   link_event_callback_{nullptr}; /**< 已注册的事件回调；nullptr 表示关闭通知。 */
+    void*               link_event_context_{nullptr};  /**< 事件回调上下文，原样回传。 */
+    bool                exti_registered_{false};       /**< 软件 EXTI 是否已注册到分发器。 */
     std::uint32_t       address_     = 0U;  /**< 当前绑定地址（0–31）；未就绪时为 0。 */
     PhyResult           status_      = PhyResult::NotInitialized; /**< start() 与写失败后的粘性状态。 */
     PhyLinkMode         supported_modes_ = PhyLinkMode::None; /**< start() 时缓存的器件模式。 */

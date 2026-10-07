@@ -196,9 +196,11 @@ DP83822Phy::DP83822Phy(ETH_HandleTypeDef& eth,
     eth_(eth),
     requested_address_(address),
     reset_n_(reset_n),
-    interrupt_n_(interrupt_n)
+    interrupt_n_(interrupt_n),
+    interrupt_input_(interrupt_n.port, interrupt_n.pin, this)
 {
     /* 只保存配置：不访问硬件、不产生总线流量、不会失败，可安全用于静态存储期对象。 */
+    /* interrupt_input_ 以 this 作为 user_data，供 EXTI 分发器找回本实例；构造时不注册。 */
 }
 
 PhyResult DP83822Phy::start(const PhyLinkConfig& config) noexcept
@@ -208,6 +210,16 @@ PhyResult DP83822Phy::start(const PhyLinkConfig& config) noexcept
     address_           = 0U;
     supported_modes_   = PhyLinkMode::None;
     autoneg_supported_ = false;
+
+    /* 重建前先撤销自身的旧 EXTI 注册（保留 callback/context，供本次成功后重新挂载）。 */
+    if (exti_registered_)
+    {
+        const std::uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        bsp::gpio::UnregisterExtiCallback(&interrupt_input_);
+        exti_registered_ = false;
+        __set_PRIMASK(primask);
+    }
 
     /* 地址、config 形状与 GPIO 引脚非法必须在任何 HAL/MDIO/引脚动作之前判定。 */
     PhyResult status = PhyResult::Ok;
@@ -250,7 +262,62 @@ PhyResult DP83822Phy::start(const PhyLinkConfig& config) noexcept
         address_ = 0U;
 
     status_ = status;
+
+    /* 成功设置 status_ 后才为有效 INT 引脚注册软件 EXTI；失败不留下注册，无 INT 不注册。 */
+    if ((status_ == PhyResult::Ok) && hasInterruptPin())
+    {
+        const std::uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        bsp::gpio::RegisterExtiCallback(&interrupt_input_, &DP83822Phy::onInterrupt);
+        exti_registered_ = true;
+        __set_PRIMASK(primask);
+    }
+
     return status_;
+}
+
+DP83822Phy::~DP83822Phy() noexcept
+{
+    /* 只撤销软件 EXTI 回调注册：不访问 MDIO、不复位器件、不动引脚。 */
+    if (exti_registered_)
+    {
+        const std::uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        bsp::gpio::UnregisterExtiCallback(&interrupt_input_);
+        exti_registered_ = false;
+        __set_PRIMASK(primask);
+    }
+}
+
+void DP83822Phy::setLinkEventCallback(const LinkEventCallback callback, void* const context) noexcept
+{
+    /*
+     * 只保存参数：不注册/修改 EXTI、不改 PHY 配置、不访问硬件。用保存/恢复 PRIMASK 的短
+     * 临界区原子更新两个字段，避免 ISR 读到半配置（旧回调配新 context 之类）。
+     */
+    const std::uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    link_event_callback_ = callback;
+    link_event_context_  = context;
+    __set_PRIMASK(primask);
+}
+
+void DP83822Phy::onInterrupt(const bsp::gpio::GpioPinInput* const gpio,
+                             const std::uint32_t               counter) noexcept
+{
+    /* counter 仅用于分发器内部累计，此处不需要。 */
+    (void)counter;
+
+    if (gpio == nullptr)
+        return;
+
+    const auto* self = static_cast<const DP83822Phy*>(gpio->user_data);
+    if (self == nullptr)
+        return;
+
+    /* 只转发事件通知：不访问 MDIO、不调用 RTOS；callback/context 由短临界区原子维护。 */
+    if (self->link_event_callback_ != nullptr)
+        self->link_event_callback_(self->link_event_context_);
 }
 
 PhyResult DP83822Phy::validateConfig(const PhyLinkConfig& config) noexcept
