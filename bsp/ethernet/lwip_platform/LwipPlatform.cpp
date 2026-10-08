@@ -11,8 +11,12 @@
  * 线程与事件：start() 静态分配创建唯一 EthLink 线程，线程内先发布自身 ID（release），再
  * 启动 PHY 并接入 PHY 事件回调。TX 完成与 PHY 事件在 ISR 中只置线程标志（acquire 读取已
  * 发布的 ID），真正的 MDIO/HAL 操作全部回到线程完成，ISR 内不访问 MDIO、不调用 IPhy 虚
- * 函数。无中断模式由轮询回收 TX，notifyTxComplete() 直接返回；中断模式不调用
- * osThreadFlagsClear，避免旧 CMSIS 实现的读改写丢失并发 TX 位。
+ * 函数。两种事件模式共用同一等待循环：TX 完成与 PHY 事件都由 osThreadFlagsWait 唤醒——
+ * 该调用默认（未传 osFlagsNoClear）在返回前清除所选标志位，因此无需显式 FlagsClear；显式
+ * osThreadFlagsClear 因旧 CMSIS-FreeRTOS 适配层的读改写会丢失并发 TX 置位，那是与“wait
+ * 已经清除所选位”无关的另一件事，故不采用。无 INT 模式按绝对 deadline 每 kPollDelayTicks
+ * 周期 poll；有 INT 模式在 INT 为高时无限期等待事件，在 INT 卡低且确认后仍无事件时退化为
+ * 同一周期 poll，因此每轮都有界阻塞，不存在断言低电平的忙等。
  */
 #include "LwipPlatform.hpp"
 
@@ -93,12 +97,11 @@ bool LwipPlatform::start(struct netif& netif, const PhyLinkConfig& config, Error
 
 void LwipPlatform::notifyTxComplete() noexcept
 {
-    /* 先 acquire 读取已发布的 ID，与工作线程的 release 发布同步后再读 interrupt_mode_。 */
+    /* 先 acquire 读取工作线程以 release 发布的 ID；未发布（未启动/已终止）则不动作。
+       两种事件模式都置 TX 标志：无 INT 模式同样由等待循环唤醒立即回收，不等下一轮 poll。 */
     const osThreadId_t id = thread_id_.load(std::memory_order_acquire);
     if (id == nullptr)
         return;
-    if (!interrupt_mode_)
-        return; /* 无中断模式由轮询回收 TX，本入口不置标志。 */
     (void)osThreadFlagsSet(id, kTxFlag);
 }
 
@@ -127,70 +130,118 @@ void LwipPlatform::run() noexcept
         return;
     }
 
-    /* PHY 启动成功后接入事件回调；首轮快照与 active-low 检查补偿安装通知前的事件。 */
+    /* PHY 启动成功后接入事件回调；首轮快照补偿安装通知之前可能已丢失的边沿。 */
     phy_.setLinkEventCallback(&LwipPlatform::onPhyEvent, this);
 
-    if (!interrupt_mode_)
+    if (interrupt_mode_)
     {
-        for (;;)
+        const PollResult result = handleLinkEvent(true);
+        if (result != PollResult::Ok)
         {
-            const PollResult result = poll();
-            if (result != PollResult::Ok && result != PollResult::PhyReadError)
-            {
-                fail(result);
-                return;
-            }
-            osDelay(kPollDelayTicks);
+            fail(result);
+            return;
         }
     }
 
-    bool first = true;
+    /* 周期 PHY poll 的绝对 deadline（tick）。无 INT 轮询模式始终启用；有 INT 模式仅在 INT
+       卡低、事件等待失去意义时启用。deadline 只在 poll 之后（或首次进入退化时）锚定，因此
+       持续到达的 TX 通知只重算剩余量，不会把 100 tick 节拍往后顺延；差值用无符号减法，
+       tick 回绕后仍正确。
+
+       loop invariant：每轮至少完成一件实事——处理一个已置位的线程标志、执行一轮 poll，或
+       阻塞在 osThreadFlagsWait 中；INT 保持低时该阻塞上限为 remaining <= kPollDelayTicks，
+       故不存在无阻塞的忙等。 */
+    bool          periodic  = !interrupt_mode_;
+    std::uint32_t next_poll = osKernelGetTickCount(); /* 轮询模式首轮立即 poll。 */
+
     for (;;)
     {
-        if (first)
+        if (interrupt_mode_)
         {
-            first = false;
-            const PollResult result = handleLinkEvent(true);
-            if (result != PollResult::Ok)
+            if (phy_.interruptAsserted())
             {
-                fail(result);
-                return;
+                /* INT 已拉低：事件已在线上，立即确认；即使回调未接线漏置标志也不会盲等。 */
+                const PollResult result = handleLinkEvent(false);
+                if (result != PollResult::Ok)
+                {
+                    fail(result);
+                    return;
+                }
             }
-            continue;
+
+            if (phy_.interruptAsserted())
+            {
+                /* 确认后仍为低：不依赖新的中断边沿，退化为有界等待 + 周期 poll；deadline
+                   已锚定则不重置，避免持续断言把节拍无限顺延。 */
+                if (!periodic)
+                {
+                    periodic  = true;
+                    next_poll = osKernelGetTickCount() + kPollDelayTicks;
+                }
+            }
+            else
+            {
+                periodic = false; /* 中断回到高电平：恢复纯事件等待。 */
+            }
         }
 
-        /* INT 仍为低：直接确认，无需再等边沿。 */
-        if (phy_.interruptAsserted())
+        std::uint32_t timeout = osWaitForever;
+        if (periodic)
         {
-            const PollResult result = handleLinkEvent(false);
-            if (result != PollResult::Ok)
+            const std::uint32_t remaining = next_poll - osKernelGetTickCount();
+            if (remaining == 0U || remaining > kPollDelayTicks)
             {
-                fail(result);
-                return;
+                /* deadline 已到（含越过 deadline 后差值回绕变大）：先判到期再等待，保证 TX
+                   通知不能推迟节拍；也不使用 timeout == 0 的等待，因为无标志时它返回
+                   osFlagsErrorResource，会与超时语义混淆。 */
+                if (!pollPeriodic())
+                    return;
+                next_poll = osKernelGetTickCount() + kPollDelayTicks;
+                continue;
             }
-            continue;
+            timeout = remaining; /* 未到期：remaining 落在 (0, kPollDelayTicks]。 */
         }
 
-        const std::uint32_t flags = osThreadFlagsWait(kLinkFlag | kTxFlag, osFlagsWaitAny, osWaitForever);
+        const std::uint32_t flags =
+            osThreadFlagsWait(kLinkFlag | kTxFlag, osFlagsWaitAny, timeout);
+
+        if (flags == osFlagsErrorTimeout)
+        {
+            /* 只有 periodic 分支可能超时：到点执行周期 poll 并锚定下一个 deadline。 */
+            if (!periodic)
+            {
+                fail(PollResult::ThreadWaitError);
+                return;
+            }
+            if (!pollPeriodic())
+                return;
+            next_poll = osKernelGetTickCount() + kPollDelayTicks;
+            continue;
+        }
         if ((flags & osFlagsError) != 0U)
         {
             fail(PollResult::ThreadWaitError);
             return;
         }
 
+        /* wait 默认已清除本次返回的所选位，无需显式 FlagsClear；只处理本次返回的位，TX 与
+           Link 通知互不吞并（同一次等待同时返回两位时两者都处理）。 */
         if ((flags & kTxFlag) != 0U)
             releaseTxPackets();
 
         if ((flags & kLinkFlag) != 0U)
         {
-            const PollResult result = handleLinkEvent(false);
-            if (result != PollResult::Ok)
+            /* 无 INT 模式下 PHY 不触发回调，Link 位不会出现；仅中断模式需要确认。 */
+            if (interrupt_mode_)
             {
-                fail(result);
-                return;
+                const PollResult result = handleLinkEvent(false);
+                if (result != PollResult::Ok)
+                {
+                    fail(result);
+                    return;
+                }
             }
         }
-        /* 不 clear 标志；残留 Link 位最多导致一次空 ack，处理完总回到循环复查 INT。 */
     }
 }
 
@@ -267,8 +318,10 @@ PollResult LwipPlatform::poll() noexcept
 
     if (mac_started_ && state == applied_state_)
     {
-        /* 无模式变更时仅回收已完成 TX，保证最后一次发送的引用最终释放。 */
+        /* 无模式变更时仅回收已完成 TX，并恢复 netif link up（可能被外部或清理路径置 down）；
+           不重复配置/启动 MAC。 */
         (void)HAL_ETH_ReleaseTxPacket(&eth_);
+        setLinkUpLocked();
         UNLOCK_TCPIP_CORE();
         return PollResult::Ok; /* 模式未变，不重复配置/启动。 */
     }
@@ -291,11 +344,25 @@ PollResult LwipPlatform::poll() noexcept
     mac_started_   = true;
     applied_state_ = state;
     /* netif link up 在仍持 core lock 时报告。 */
-    if (bound_netif_ != nullptr && netif_is_link_up(bound_netif_) == 0U)
-        netif_set_link_up(bound_netif_);
+    setLinkUpLocked();
 
     UNLOCK_TCPIP_CORE();
     return PollResult::Ok;
+}
+
+bool LwipPlatform::pollPeriodic() noexcept
+{
+    const PollResult result = poll();
+
+    if (result == PollResult::Ok)
+        return true;
+    /* 无 INT 轮询模式容忍单轮读取失败（poll 已安全停链），下一周期重试；有 INT 模式
+       （含 INT 卡低退化出的周期 poll）与其余结果一律按终止语义上报，不新增错误策略。 */
+    if (!interrupt_mode_ && result == PollResult::PhyReadError)
+        return true;
+
+    fail(result);
+    return false; /* fail 内已 osThreadExit；此处仅为满足返回类型。 */
 }
 
 void LwipPlatform::releaseTxPackets() noexcept
@@ -329,6 +396,12 @@ void LwipPlatform::setLinkDownLocked() noexcept
 {
     if (bound_netif_ != nullptr && netif_is_link_up(bound_netif_) != 0U)
         netif_set_link_down(bound_netif_);
+}
+
+void LwipPlatform::setLinkUpLocked() noexcept
+{
+    if (bound_netif_ != nullptr && netif_is_link_up(bound_netif_) == 0U)
+        netif_set_link_up(bound_netif_);
 }
 
 bool LwipPlatform::stopMacLocked() noexcept

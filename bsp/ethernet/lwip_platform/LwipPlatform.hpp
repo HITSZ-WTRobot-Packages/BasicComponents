@@ -36,6 +36,11 @@
  *   - 线程控制块与栈为对象内静态存储：`StaticTask_t` + `StackType_t[1024/sizeof]`，属性
  *     名称 `"EthLink"`、栈 1024 字节、优先级 `osPriorityBelowNormal`（沿用原启动代码）。
  *     依赖 `configSUPPORT_STATIC_ALLOCATION=1`，不新增 RTOS 堆分配。
+ *   - 优先级约束（MUST）：`osPriorityBelowNormal` 必须严格低于 CubeMX 生成的 `EthIf` 线程
+ *     （`osPriorityRealtime`）。`EthIf` 在其线程上下文调用 `HAL_ETH_ReadData()` 时不持有
+ *     LwIP core lock，而本线程的 `HAL_ETH_Start_IT()` 与描述符重建同样不受 core lock 对 RX
+ *     的保护；若把 EthLink 提升到 `>= EthIf`，Start/描述符重建可能在 RX 处理中途抢占并破坏
+ *     RX 描述符状态。不得提高本线程优先级。
  *
  * 编译前提：
  *   - 调用方须先调用 HAL_ETH_Init 完成 MAC 外设初始化；本类不初始化 MAC 外设。
@@ -75,7 +80,7 @@ enum class PollResult : std::uint8_t
     InvalidPhyState,   ///< readLink 返回契约外结果，或返回未知链路状态；不继续配置。
     PhyStartError,     ///< 线程内 PHY 初始化（start）失败；线程内不再重试。
     PhyInterruptError, ///< 确认 PHY 中断（acknowledgeInterrupt）失败；中断模式终止。
-    ThreadWaitError,   ///< 等待线程标志（osThreadFlagsWait）返回错误；线程终止。
+    ThreadWaitError,   ///< 等待线程标志返回非超时错误；线程终止（超时按周期 poll 处理）。
 };
 
 /**
@@ -123,8 +128,9 @@ public:
     /**
      * @brief ETH TX 完成 ISR 入口：仅通知链路线程回收 TX，不访问 PHY/MAC/HAL。
      *
-     * 可在 ISR 上下文调用。中断模式下置线程 TX 标志；无中断模式由轮询回收 TX，本函数直接
-     * 返回。线程未发布 ID（未启动/已终止）时无操作。
+     * 可在 ISR 上下文调用。线程 ID 已发布时无条件置 TX 标志：两种事件模式都经
+     * `osThreadFlagsWait` 唤醒处理 TX——无 INT 轮询模式同样立即回收，不等到下一轮 PHY poll。
+     * 线程未发布 ID（未启动/已终止）时无操作。
      */
     void notifyTxComplete() noexcept;
 
@@ -135,7 +141,13 @@ private:
     /** @brief PHY 事件回调（可能 ISR）：仅置 Link 标志并唤醒线程。 */
     static void onPhyEvent(void* context) noexcept;
 
-    /** @brief 链路线程主循环：先启动 PHY，再按中断/轮询模式运行。 */
+    /**
+     * @brief 链路线程主循环：启动 PHY 后统一等待 TX/Link 线程标志与周期 PHY poll。
+     *
+     * 无 INT 模式按绝对 deadline 每 kPollDelayTicks 执行一轮 poll；有 INT 模式在 INT 为高时
+     * 无限期等待事件，在 INT 卡低且确认后仍无事件时退化为同一周期 poll（每轮有界阻塞，
+     * 不存在断言低电平的忙等）。持续到达的 TX 通知不会推迟该节拍。
+     */
     void run() noexcept;
 
     /**
@@ -160,6 +172,15 @@ private:
     [[nodiscard]] PollResult handleLinkEvent(bool force_snapshot) noexcept;
 
     /**
+     * @brief 执行一轮周期 PHY poll，并按事件模式判定能否继续。
+     *
+     * 无 INT 轮询模式容忍单轮 PhyReadError（poll 已安全停链），返回 true 以便下一周期重试；
+     * 有 INT 模式（含 INT 卡低退化出的周期 poll）与其余非 Ok 结果都走终止路径，不新增策略。
+     * @return true 可继续循环；false 表示已调用 fail（线程即将终止）。
+     */
+    [[nodiscard]] bool pollPeriodic() noexcept;
+
+    /**
      * @brief 只回收已完成 TX：在 core lock 内调用 HAL_ETH_ReleaseTxPacket，不读取 PHY。
      *
      * 供 TX 完成通知路径复用：不产生 MDIO 流量、不改变链路状态。需 core lock，不得在 ISR
@@ -176,6 +197,9 @@ private:
     /** @brief 在 core lock 内置链路为 down（幂等）。 */
     void setLinkDownLocked() noexcept;
 
+    /** @brief 在 core lock 内置链路为 up（幂等；仅在 netif 尚未 up 时调用）。 */
+    void setLinkUpLocked() noexcept;
+
     /**
      * @brief 停止 MAC；前置：已持 core lock。
      * @return true 已停止或本就未启动；false HAL_ETH_Stop_IT 失败，此时保留
@@ -189,13 +213,13 @@ private:
      */
     bool startMacLocked(std::uint32_t speed, std::uint32_t duplex) noexcept;
 
-    /** @brief Link 事件线程标志（ISR 置位）。 */
+    /** @brief Link 事件线程标志（ISR 置位）；由 osThreadFlagsWait 唤醒时默认清除。 */
     static constexpr std::uint32_t kLinkFlag{ 1UL << 0U };
-    /** @brief TX 完成线程标志（ISR 置位）。 */
+    /** @brief TX 完成线程标志（ISR 置位）；由 osThreadFlagsWait 唤醒时默认清除。 */
     static constexpr std::uint32_t kTxFlag{ 1UL << 1U };
     /** @brief 链路线程栈字节数，沿用原 EthLink 线程参数。 */
     static constexpr std::uint32_t kStackBytes{ 1024U };
-    /** @brief 轮询模式单轮延时（tick）。 */
+    /** @brief 周期 PHY poll 节拍（tick）；无 INT 轮询模式与 INT 卡低退化均按绝对 deadline 使用。 */
     static constexpr std::uint32_t kPollDelayTicks{ 100U };
 
     ETH_HandleTypeDef& eth_; ///< 借用，不拥有。

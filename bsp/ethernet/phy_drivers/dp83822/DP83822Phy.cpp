@@ -472,22 +472,28 @@ PhyResult DP83822Phy::applyConfig(const PhyLinkConfig& config) noexcept
         const bool full_duplex = (config.modes & PhyLinkMode::Base10Full) != PhyLinkMode::None ||
                                  (config.modes & PhyLinkMode::Base100Full) != PhyLinkMode::None;
 
-        /* 强制模式：设定速率/双工位并清除自动协商使能，保持其余控制位。 */
+        /*
+         * 强制模式：先清掉自动协商使能、速率/双工与 bit9，再按所选模式设置速率/双工位
+         * （10M/半双工对应位为 0），其余控制位保持。bit9（Restart Auto-Negotiation）只在
+         * bit12 置位时才有意义，因此这里既不置位，也一并清掉继承来的 bit9：强制模式下不得
+         * 触发或残留一次协商重启。
+         */
         std::uint16_t desired = bmcr;
         desired &= static_cast<std::uint16_t>(
-                ~static_cast<std::uint16_t>(kBmcrAutonegEnable | kBmcrSpeed100 | kBmcrDuplexFull));
+                ~static_cast<std::uint16_t>(kBmcrAutonegEnable | kBmcrSpeed100 | kBmcrDuplexFull |
+                                            kBmcrRestartAutoneg));
         if (speed_100)
             desired |= kBmcrSpeed100;
         if (full_duplex)
             desired |= kBmcrDuplexFull;
 
-        /* 相同的有效速率/双工/协商配置不重复写入，也不重启协商。 */
-        const std::uint16_t compare_mask = static_cast<std::uint16_t>(
-                ~static_cast<std::uint16_t>(kBmcrRestartAutoneg));
-        if ((bmcr & compare_mask) == (desired & compare_mask))
+        /*
+         * 幂等比较包含 bit9：即使速率/双工/协调使能已相同，继承来的 bit9=1 也必须通过
+         * 一次写入清掉，因此这里直接比较完整寄存器值，不做任何位屏蔽。
+         */
+        if (bmcr == desired)
             return PhyResult::Ok;
 
-        desired |= kBmcrRestartAutoneg;
         if (writeRegister(kRegBmcr, desired) != PhyResult::Ok)
             return failAfterWrite();
         return PhyResult::Ok;

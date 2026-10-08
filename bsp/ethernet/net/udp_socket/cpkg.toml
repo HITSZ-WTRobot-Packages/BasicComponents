@@ -1,5 +1,5 @@
 format_version = 1
-name = "LwipPlatform"
+name = "UdpSocket"
 pkgname = "Ethernet::UdpSocket"
 version = "0.1.0"
 dependencies = ["EthernetPHY::Core", "FreeRTOS", "LwIP", "stm32cubemx"]

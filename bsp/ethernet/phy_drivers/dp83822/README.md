@@ -37,6 +37,20 @@ bsp::ethernet_phy::DP83822Phy phy{ heth, 1U, reset_n, interrupt_n };
   `HAL_GPIO_EXTI_IRQHandler`，唯一的 `HAL_GPIO_EXTI_Callback` 转发到
   `bsp::gpio::DispatchExtiInterrupt`。
 
+## 链路配置（BMCR / ANAR）语义
+
+`start()` 与 `configureLink()` 共用的 `applyConfig()` 直接读写 BMCR/ANAR，语义如下：
+
+- **强制模式**：清除 BMCR bit12（自动协商使能）与 bit9（Restart Auto-Negotiation），
+  并按所选模式设置 bit13（速率）与 bit8（双工）——这两个位取自所选模式（例如 10M/半双工
+  对应位为 0），不是一律清零；其余控制位保持。bit9 只在 bit12 置位时才有意义，因此强制
+  模式下既不置位、也把继承来的 bit9 一并清掉，绝不触发协商重启。幂等判断比较完整 BMCR
+  寄存器值：只有已完全一致才不写，遗留的 bit9=1 也会被这一次写入清掉。
+- **自动协商模式**：先按请求模式更新 ANAR 通告掩码（保留暂停等无关位）；当通告有变化或
+  此前处于强制模式时，以 `BMCR | bit12 | bit9` 写入以重启协商。已是自动协商且通告未变时
+  不写寄存器、不重启协商；`restartAutoNegotiation()` 仍可显式重启，强制模式下它返回
+  `Unsupported` 且不产生写入。
+
 ## 数据手册依据
 
 [TI DP83822 SNLS505H](https://www.ti.com/lit/ds/symlink/dp83822i.pdf)，

@@ -42,6 +42,12 @@ void notifyTxComplete() noexcept;   // ETH TX 完成 ISR 入口
 
 - 线程控制块与 1024 字节栈为对象内静态存储（`configSUPPORT_STATIC_ALLOCATION=1`），
   属性为名称 `"EthLink"`、优先级 `osPriorityBelowNormal`，不新增 RTOS 堆分配。
+- 优先级安全不变式：`EthLink` 优先级必须严格低于生成 `EthIf` 线程的
+  `osPriorityRealtime`（本类固定为 `osPriorityBelowNormal`）。RX 路径
+  （`ethernetif_input` → `low_level_input` → `HAL_ETH_ReadData`）在 `EthIf` 内执行且
+  **不持有** LwIP core lock，而本线程的 MAC 转换（Get/Set/Start/Stop）在 core lock 内进行；
+  只有该优先级顺序才能保证本线程不会抢占正在执行 RX HAL 的 `EthIf`。任何提高本线程
+  优先级的改动都会破坏该不变式。
 - 线程 ID 由工作线程自己以无锁原子方式发布（release），创建者不在 `osThreadNew` 返回后写回，
   因此允许线程在创建函数返回前就开始运行。
 - 借用 `eth`/`phy`/`netif` 必须覆盖线程整个生命周期；对象不可拷贝/移动。
@@ -55,13 +61,36 @@ void notifyTxComplete() noexcept;   // ETH TX 完成 ISR 入口
 
 ## 两种事件模式
 
-- **无 INT**：立即读取首轮，此后每轮只延时 100 RTOS tick；`PhyReadError` 允许下一周期恢复，
-  TX 由每轮检查回收，因此 `notifyTxComplete()` 直接返回、不置标志。
-- **有 INT**：首轮确认中断并强制读取一次快照（补偿安装通知之前的事件）；之后检查已拉低的 INT，
-  否则 `osThreadFlagsWait(Link | Tx, osFlagsWaitAny, osWaitForever)`。只有真实链路事件才重新读取链路，
-  空闲不周期访问 MDIO；TX-only 唤醒仅回收已完成 TX。
-  不调用 `osThreadFlagsClear()`：旧 CMSIS-FreeRTOS 适配层的读改写会覆盖并发 TX 位，
-  标志由 wait 消费，残留的 Link 标志最多导致一次空确认，不重复读取链路。
+`run()` 是单一等待循环，用绝对 tick deadline 统一驱动周期 poll 与事件等待：
+
+- **无 INT（轮询）**：周期模式恒开，首轮立即 poll；此后按 100 RTOS tick 的绝对 deadline
+  推进。`PhyReadError` 容忍一轮（当轮 `poll()` 已安全停链），下一周期重试。
+- **有 INT**：先做一次强制快照（`handleLinkEvent(true)`，补偿安装通知前已丢失的事件）。此后
+  每轮采样 INT：INT 拉低则立即 `handleLinkEvent(false)` 确认，避免回调漏置标志时盲等。
+  无论本轮是否确认中断，都会再次检查 INT 电平：高电平恢复**纯事件等待**
+  （`osThreadFlagsWait(..., osWaitForever)`，空闲不访问 MDIO），包括在有界等待期间自行
+  恢复为高的情况；低电平则退化为**有界等待 + 周期 poll**（等待上限 `<= 100 tick`）。
+  退化只取决于 INT 电平，与本次确认是否报告了链路变化无关。除首轮快照外，纯事件模式
+  只在链路事件时重新读取链路；退化模式还在节拍到期时 poll。任一轮 poll（含退化出的
+  周期 poll）的非 `Ok` 结果都按终止语义上报。
+
+等待与节拍细节：
+
+- `osThreadFlagsWait(Link | Tx, osFlagsWaitAny, timeout)`：`timeout` 为 `osWaitForever`
+  （纯事件等待）或到下一 deadline 的剩余量，取值 `(0, 100]`；不使用 `timeout == 0`，因为
+  无标志时它返回 `osFlagsErrorResource`，会与超时语义混淆。
+- TX 完成（`notifyTxComplete()`）在两种模式下都无条件置 `Tx` 标志（线程 ID 未发布时为空
+  操作），所以 TX-only 唤醒会立即回收已完成 TX，不等到下一轮 poll。
+- `next_poll` 是绝对 deadline，仅在两种时机锚定为 `now + 100 tick`：首次进入退化状态时，
+  以及每次周期 poll 之后。TX 唤醒、以及在退化等待尚未到期时的反复 INT 断言都**不会**重新
+  锚定，所以持续不断的 TX 不会把 100 tick 的 PHY poll 节拍往后顺延。剩余量用无符号减法
+  计算，tick 回绕后仍然正确。
+- `osFlagsErrorTimeout` 不是错误：它只在周期分支出现，按到点执行一次周期 poll 处理；其余
+  `osFlagsError` 仍按 `ThreadWaitError` 终止。
+- `osThreadFlagsWait()` 未传 `osFlagsNoClear`，默认就在返回时自动清除本次命中的标志位，
+  因此 `Link`/`Tx` 标志由 wait 自身消费，且两位互不吞并（同一次返回两位时都处理）；实现
+  不调用 `osThreadFlagsClear()`——旧 CMSIS-FreeRTOS 适配层里该函数是读改写，会覆盖并发的
+  TX 位。“wait 默认自动清除”与“不做显式 FlagsClear”是两件事。
 
 ## 集成要求（消费工程）
 
@@ -74,8 +103,7 @@ void notifyTxComplete() noexcept;   // ETH TX 完成 ISR 入口
 - PHY 侧要求见 [`../phy_drivers/dp83822/README.md`](../phy_drivers/dp83822/README.md) 与
   [`../core/README.md`](../core/README.md)。
 
-示例（CoreV2_ETH 的 `UserCode/app.cpp`；该工程把全部接线放在应用侧，
-`LWIP/App/lwip.c` 与 `LWIP/Target/ethernetif.c/.h` 保持 CubeMX 生成原样）：
+示例（CoreV2_ETH 的 `UserCode/app.cpp`；该工程把全部接线放在应用侧）：
 
 ```cpp
 using namespace bsp::ethernet_phy;
@@ -96,6 +124,16 @@ if (HAL_ETH_RegisterCallback(&heth, HAL_ETH_TX_COMPLETE_CB_ID,
 if (!platform.start(*netif_default, config, [](PollResult) noexcept { Error_Handler(); }))
     Error_Handler();
 ```
+
+## CubeMX 生成文件与 configure 补丁
+
+`LWIP/App/lwip.c`、`LWIP/Target/ethernetif.c/.h` 的接线代码不做手工修改，但**不能称为逐字节
+原样**：CubeMX 模板把 EthIf 线程栈硬编码为 `INTERFACE_THREAD_STACK_SIZE ( 350 )`，而
+CMSIS-RTOS V2 下 `ethernetif_input()` 需要 1024 字节。工程根 `CMakeLists.txt` 在 configure
+阶段把 `LWIP/Target/ethernetif.c` 中的该宏改写为 `( 1024 )`，并把该文件加入
+`CMAKE_CONFIGURE_DEPENDS`：CubeMX 重新生成后，下一次 configure 由该依赖触发，补丁再次
+把 350 改回 1024（值已正确时不重复写入）。因此生成文件里只有这一处宏由构建系统维护，
+重新生成不会让它丢失，其余生成内容保持不变。
 
 CubeMX 再生成注意：生成代码会在 `MX_LWIP_Init` 末尾创建名为 `EthLink` 的空链路线程
 （函数体只有 `osDelay(100)`，不访问 PHY/MAC 或 netif link）。它与本平台的链路线程并存，
