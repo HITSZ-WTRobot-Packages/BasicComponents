@@ -122,8 +122,7 @@ struct StaticObjectInitializer
             [&](auto* static_object_detail_storage_##line)                                         \
             {                                                                                      \
                 return ::new (static_cast<void*>(static_object_detail_storage_##line))::std::      \
-                        remove_pointer_t<decltype(static_object_detail_storage_##line)>(           \
-                                __VA_ARGS__);                                                      \
+                        remove_reference_t<decltype(*(object))>(__VA_ARGS__);                      \
             })
 
 #define STATIC_OBJECT_DETAIL_INIT_EXPAND(object, line, ...)                                        \
