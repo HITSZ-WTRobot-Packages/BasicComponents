@@ -2,4 +2,4 @@ format_version = 1
 name = "DP83822"
 pkgname = "EthernetPHY::DP83822"
 version = "0.1.0"
-dependencies = ["EthernetPHY::Core", "stm32cubemx"]
+dependencies = ["EthernetPHY::Core", "stm32cubemx", "bsp::GPIO_Driver"]

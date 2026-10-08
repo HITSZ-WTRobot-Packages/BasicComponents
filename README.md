@@ -7,6 +7,11 @@
 - bsp: 对 HAL 库的基本封装
     - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fcan_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) can_driver ：STM32 bxCAN 驱动
     - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fgpio_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) gpio_driver ：STM32 GPIO 封装（GPIO + PWM）
+    - ethernet: 以太网与 PHY 组件
+        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Fcore&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [core](bsp/ethernet/core/README.md) ：`IPhy` 同步 PHY 契约与链路事件接口
+        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Fphy_drivers%2Fdp83822&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [dp83822](bsp/ethernet/phy_drivers/dp83822/README.md) ：DP83822 PHY 驱动（可选 RESET_N / INT_PWDN_N）
+        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Flwip_platform&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [lwip_platform](bsp/ethernet/lwip_platform/README.md) ：持有链路线程的 STM32 ETH MAC / LwIP netif 平台
+        - udp_socket ：UDP socket 封装
 
 - libs:
     - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Fconcurrency&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) concurrency ： 并发控制库
@@ -31,22 +36,3 @@
     - isr_lock.h: 中断保护锁
 
 具体使用方法请查看代码注释
-
-## Ethernet 链路轮询
-
-`bsp/ethernet/lwip_platform` 的 `LwipPlatform::poll()` 返回 `PollResult`，不再返回 `bool`。
-链路状态仍由 `PhyLinkState` 表示；正常断链和协商中不是轮询错误。
-
-| 结果 | 含义 |
-| --- | --- |
-| `Ok` | 本轮链路状态已成功处理，不代表链路一定为 up。 |
-| `PhyReadError` | PHY 寄存器读取失败；接口已置为 down，MAC 已停止或本就未启动，可由下一周期重新检查。 |
-| `MacStopError` | 停止 MAC 或其必要取锁失败；优先于同时发生的 PHY 读取错误上报。 |
-| `MacStartError` | 获取/设置 MAC 配置、启动 MAC 或其必要取锁失败。 |
-| `NotInitialized` | 平台尚未初始化，或 PHY 报告未就绪。 |
-| `InvalidPhyState` | PHY 返回未知链路状态，或 `readLink()` 返回契约外结果。 |
-
-STM32H723 示例的 C 入口 `lwip_platform_poll()` 保留 `bool`，无需修改 Cube 生成的调用代码：
-仅 `Ok`、`PhyReadError` 返回 `true`，其余结果返回 `false`，仍交由现有 `Error_Handler()` 处理。
-PHY 读取失败不会在函数内重试；下一周期读取恢复正常后，平台按实际链路状态重新启动 MAC。
-此策略不修正 HAL 的 MDIO 超时判定，也不改变线程优先级。
