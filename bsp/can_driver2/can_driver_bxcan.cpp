@@ -1,47 +1,42 @@
 /**
  * @file can_driver_bxcan.cpp
- * @brief Classic bxCAN backend of the lightweight CAN wrapper.
+ * @brief 轻量 CAN 封装的经典 bxCAN 后端实现。
  *
- * Compiled only when the firmware enables the classic CAN HAL
- * (HAL_CAN_MODULE_ENABLED -> CAN_DRIVER_FDCAN == 0). The whole translation
- * unit is empty otherwise, so no Can member is defined twice.
+ * 仅当固件启用经典 CAN HAL（HAL_CAN_MODULE_ENABLED -> CAN_DRIVER_FDCAN == 0）
+ * 时才参与编译；否则整个翻译单元为空，避免同一个 Can 成员被重复定义。
  *
- * Supported hardware configuration:
- * - Classic CAN 2.0A/B frames only; FD format (and its BRS/ESI flags) is
- *   rejected with Status::Unsupported instead of being downgraded.
- * - Payloads up to 8 bytes. HAL_CAN_AddTxMessage()/HAL_CAN_GetRxMessage()
- *   always move eight bytes, so remote frames and short caller spans are
- *   staged through a zeroed 8-byte buffer while padded_storage frames are
- *   handed to the HAL directly.
- * - Three Tx mailboxes; a full mailbox set yields Status::Busy and the frame
- *   belongs to the common software queue. Nothing is retried on its own: the
- *   queue is only pushed forward by mailbox-empty/abort/error notifications.
- * - Bus-off is latched in CAN_ESR.BOFF and reported as Status::BusOff until
- *   the node recovers (recovery stays the board's responsibility).
- * - Filters are the raw bxCAN banks. IdFilter::Mask maps to one 32-bit mask
- *   bank (identifier bits compared, IDE pinned to the requested identifier
- *   type, RTR ignored so data and remote frames both match); a standard-ID
- *   IdFilter::List maps to the two 16-bit mask entries of one bank with the
- *   same IDE/RTR semantics. Two different extended IDs cannot be expressed by
- *   one bank with those semantics and return Status::Unsupported. BankFilter
- *   is written through verbatim as the four 16/32-bit halfwords, so every
- *   IDE/RTR combination the hardware can express stays reachable.
- *   Range/FD-only actions (Priority, RxBuffer, ...), GlobalFilter and
- *   ExtendedIdMask have no bxCAN equivalent and return Status::Unsupported.
- * - On parts whose CAN1/CAN2 pair shares 28 banks, the filter registers are
- *   always reached through CAN1 (the master), including for a CAN2 handle;
- *   the master instance must therefore be initialized (clocked) as well.
- *   HAL_CAN_ConfigFilter() reprograms FMR.CAN2SB from
- *   CAN_FilterTypeDef::SlaveStartFilterBank on every call, so every bank
- *   written here passes the boundary currently held in FMR - the value
- *   configured through FilterBankSplit() is never silently reset. Bank
- *   ownership (bank < CAN2SB belongs to CAN1, the rest to CAN2) is the
- *   caller's explicit choice: the index is written as given.
- *   Every shared-domain bank and the boundary itself must be configured
- *   before either bus of the CAN1/CAN2 pair is started: a shared-domain write
- *   while the other registered bus is running is refused (Status::InvalidState)
- *   so this instance cannot enter the shared filter initialization mode
- *   underneath a live bus.
+ * 支持的硬件配置：
+ * - 只支持经典 CAN 2.0A/B 帧；FD 格式（以及其 BRS/ESI 标志）以
+ *   Status::Unsupported 拒绝，而不是降级发送。
+ * - 载荷上限 8 字节。HAL_CAN_AddTxMessage()/HAL_CAN_GetRxMessage() 总是搬运
+ *   8 个字节，因此远程帧和调用方传入的短 span 会先经一个清零的 8 字节缓冲暂存，
+ *   而 padded_storage 帧（背后是 StoredFrame，其可读尾部已初始化）直接交给 HAL。
+ * - 三个 Tx 邮箱；邮箱全满返回 Status::Busy，该帧仍归属公共软件队列。本层不会
+ *   自行重试：软件队列只由邮箱空/中止/错误通知推动前进。
+ * - Bus-off 由 CAN_ESR.BOFF 锁存，节点恢复前一直返回 Status::BusOff
+ *   （恢复动作由板级负责）。
+ *
+ * 滤波器即原始 bxCAN bank：
+ * - IdFilter::Mask 映射到一个 32 位 mask bank（比较标识符位，IDE 固定为请求的
+ *   标识符类型，RTR 不参与比较，因此数据帧与远程帧都能匹配）；
+ * - 标准 ID 的 IdFilter::List 映射到同一 bank 的两个 16 位 mask 项，IDE/RTR
+ *   语义与上相同；两个不同的扩展 ID 无法用具有该语义的单个 bank 表达，返回
+ *   Status::Unsupported。
+ * - BankFilter 以四个 16/32 位半字原样写入，因此硬件能表达的每种 IDE/RTR 组合
+ *   都可达。
+ * - Range/FD 专属动作（Priority、RxBuffer 等）、GlobalFilter 与 ExtendedIdMask
+ *   在 bxCAN 上没有对应物，返回 Status::Unsupported。
+ *
+ * 在 CAN1/CAN2 共用 28 个 bank 的型号上，滤波器寄存器始终通过 CAN1（主控）访问，
+ * 即使是 CAN2 的 handle 也一样；因此主实例也必须被初始化（有时钟）。每次调用
+ * HAL_CAN_ConfigFilter() 都会用 CAN_FilterTypeDef::SlaveStartFilterBank 重写
+ * FMR.CAN2SB，所以这里写入的每个 bank 都携带当前 FMR 中的边界值——通过
+ * FilterBankSplit() 配置的分界不会被悄悄复位。bank 归属（bank < CAN2SB 属于
+ * CAN1，其余属于 CAN2）由调用方显式决定：索引按给定值写入。
+ * 共享域中的每个 bank 以及分界本身都必须在 CAN1/CAN2 这对总线的任一条启动之前
+ * 配置完成：若另一条已注册总线正在运行，则共享域写入会被拒绝
+ * （Status::InvalidState），以保证本实例不会在一条活跃总线之下进入共享滤波器
+ * 初始化模式。
  */
 
 #include "can_driver.hpp"
@@ -52,12 +47,10 @@ namespace bsp::can
 {
 
 /**
- * bxCAN exposes one shared filter domain per register block: 14 banks on a
- * single-controller part and 28 banks behind CAN1 when a CAN2 (and, where
- * present, a separate 14-bank CAN3) exists. The macros below are the only
- * chip-specific knowledge of this backend and can be overridden from the
- * build system for a part whose vendor headers describe the domain
- * differently.
+ * 每个 bxCAN 寄存器块内只有一个共享滤波器域：单控制器型号 14 个 bank；存在 CAN2
+ * 时（以及部分型号上独立的 14 bank CAN3）CAN1 背后共有 28 个 bank。下面的宏是本
+ * 后端唯一的芯片相关假设，可由构建系统覆盖，以适配厂商头文件以不同方式描述该域
+ * 的型号。
  */
 #ifndef CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
 #    if defined(CAN2) || defined(CAN3)
@@ -79,39 +72,41 @@ namespace
 {
 
 /**
- * Filter key field positions.
+ * 滤波器关键字段的位布局。
  *
- * 32-bit scale (RM0090 32.7.2): the standard identifier occupies bits 31:21
- * (STID[10:0]), the 29 bits of an extended identifier bits 31:3
- * (STID[10:0] + EXID[17:0]), IDE bit 2, RTR bit 1.
- * 16-bit scale: STID[10:0] (or EXID[28:18]) bits 15:5, RTR bit 4, IDE bit 3,
- * EXID[17:15] bits 2:0 - RTR and IDE are swapped compared to the 32-bit scale,
- * and only the upper 11 bits of an extended ID take part in the comparison.
+ * 32 位布局（RM0090 32.7.2）：标准标识符位于第 31:21 位（STID[10:0]）；
+ * 扩展标识符的 29 位位于第 31:3 位（STID[10:0] + EXID[17:0]），IDE 为
+ * 第 2 位，RTR 为第 1 位。
+ * 16 位布局：STID[10:0]（或 EXID[28:18]）位于第 15:5 位，RTR 为第 4 位，
+ * IDE 为第 3 位，EXID[17:15] 位于第 2:0 位。RTR 和 IDE 的位置不同于
+ * 32 位布局；扩展 ID 仅比较高 14 位，低 15 位不参与比较。
  */
-constexpr std::uint32_t filter_32_id_shift  = 21U;    ///< STID[10:0] position.
-constexpr std::uint32_t filter_32_ext_shift = 3U;     ///< 29-bit extended ID position.
-constexpr std::uint32_t filter_32_ide       = 0x0004U; ///< IDE bit of the 32-bit key.
-constexpr std::uint32_t filter_16_id_shift  = 5U;     ///< STID[10:0] / EXID[28:18] position.
-constexpr std::uint32_t filter_16_ide       = 0x0008U; ///< IDE bit of the 16-bit key.
+constexpr std::uint32_t filter_32_id_shift  = 21U;    ///< STID[10:0] 的位置。
+constexpr std::uint32_t filter_32_ext_shift = 3U;     ///< 29 位扩展 ID 的位置。
+constexpr std::uint32_t filter_32_ide       = 0x0004U; ///< 32 位 key 的 IDE 位。
+constexpr std::uint32_t filter_16_id_shift  = 5U;     ///< STID[10:0] / EXID[28:18] 的位置。
+constexpr std::uint32_t filter_16_ide       = 0x0008U; ///< 16 位 key 的 IDE 位。
 
+/// 标准标识符上界 (2^11 - 1)。
 constexpr std::uint32_t standard_id_limit = 0x7FFU;
+/// 扩展标识符上界 (2^29 - 1)。
 constexpr std::uint32_t extended_id_limit = 0x1FFFFFFFU;
 
-/// Full 16-bit identifier mask: all STID[10:0] bits plus the IDE bit.
+/// 完整的 16 位标识符掩码：STID[10:0] 全部位加上 IDE 位。
 constexpr std::uint32_t filter_16_standard_mask =
     (standard_id_limit << filter_16_id_shift) | filter_16_ide;
 
-/// Full 32-bit identifier mask for an exact extended-ID match (IDE=1 compared,
-/// RTR and the reserved bit ignored).
+/// 用于精确匹配单个扩展 ID 的完整 32 位标识符掩码（比较 IDE=1，忽略 RTR 与
+/// 保留位）。
 constexpr std::uint32_t filter_32_exact_extended_mask =
     (extended_id_limit << filter_32_ext_shift) | filter_32_ide;
 
-/// Either the shared CAN1/CAN2 domain or one controller's own 14-bank domain.
+/// 判断该 handle 使用的是共享的 CAN1/CAN2 域，还是某控制器自有的 14 bank 域。
 [[nodiscard]] bool has_shared_filter_banks(const CAN_HandleTypeDef& handle) noexcept
 {
 #if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
 #    if defined(CAN3)
-    // CAN3 keeps its own filter banks and is not part of the CAN1/CAN2 domain.
+    // CAN3 拥有自己的滤波器 bank，不属于 CAN1/CAN2 共享域。
     return handle.Instance != CAN3;
 #    else
     (void)handle;
@@ -123,15 +118,14 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
 #endif
 }
 
-/// Uppermost bank index (exclusive) usable by this handle's filter domain.
+/// 该 handle 所属滤波器域可用的最大 bank 索引（开区间上界）。
 [[nodiscard]] std::uint32_t filter_bank_count(const CAN_HandleTypeDef& handle) noexcept
 {
     return has_shared_filter_banks(handle) ? CAN_DRIVER_BXCAN_SHARED_FILTER_BANK_COUNT
                                            : CAN_DRIVER_BXCAN_SINGLE_FILTER_BANKS;
 }
 
-/// Register block holding the filter banks: CAN1 for a shared domain, the
-/// handle's own instance otherwise.
+/// 承载滤波器 bank 的寄存器块：共享域为 CAN1，否则为 handle 自身实例。
 [[nodiscard]] CAN_TypeDef* filter_master(const CAN_HandleTypeDef& handle) noexcept
 {
 #if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
@@ -146,7 +140,7 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
 #endif
 }
 
-/// Boundary currently held in FMR.CAN2SB, read from the hardware.
+/// 从硬件读取 FMR.CAN2SB 中当前的分界（CAN2 可用 bank 的起始索引）。
 [[nodiscard]] std::uint32_t can2_start_bank(const CAN_HandleTypeDef& handle) noexcept
 {
 #if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
@@ -158,8 +152,9 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     return 0U;
 }
 
-/// Bank template with the domain's current split, so HAL_CAN_ConfigFilter()
-/// rewrites FMR.CAN2SB with the value it already holds.
+/// 以该域当前的分界构造 bank 模板，使 HAL_CAN_ConfigFilter() 用其已经持有的值
+/// 重写 FMR.CAN2SB（即不改动分界）。其余字段给出确定的初值，避免使用未初始化的
+/// 栈字段。
 [[nodiscard]] CAN_FilterTypeDef make_bank(const CAN_HandleTypeDef& handle) noexcept
 {
     CAN_FilterTypeDef filter{};
@@ -176,20 +171,21 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     return filter;
 }
 
+/// 把 HAL 的返回值折叠为统一的 Status；HAL 只在参数/状态异常时失败。
 [[nodiscard]] Status apply_bank(CAN_HandleTypeDef& handle, const CAN_FilterTypeDef& filter) noexcept
 {
     return HAL_CAN_ConfigFilter(&handle, &filter) == HAL_OK ? Status::Ok : Status::HardwareError;
 }
 
-/// IdFilter: identifier match by ID only, never by frame type.
+/// IdFilter：仅按 ID 匹配，绝不按帧类型匹配（见下方 RTR 处理）。
 [[nodiscard]] Status configure_id_bank(CAN_HandleTypeDef& handle, const IdFilter& request) noexcept
 {
     const std::uint32_t bank_count = filter_bank_count(handle);
     if (request.index >= bank_count)
         return Status::OutOfRange;
 
-    // calibration_message/rx_buffer_index only describe an FDCAN RxBuffer and
-    // cannot be honoured by a bxCAN FIFO bank.
+    // calibration_message/rx_buffer_index 只描述 FDCAN 的 RxBuffer，bxCAN 的
+    // FIFO bank 无法实现，故拒绝而不是忽略。
     if (request.calibration_message || request.rx_buffer_index != 0U)
         return Status::Unsupported;
 
@@ -219,7 +215,7 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
         case FilterAction::Fifo1:
             filter.FilterFIFOAssignment = CAN_FILTER_FIFO1;
             break;
-        // No bxCAN bank can reject, prioritise or act as an RxBuffer.
+        // bxCAN 的 bank 无法拒绝、无法设置优先级，也不能充当 RxBuffer。
         case FilterAction::Reject:
         case FilterAction::Priority:
         case FilterAction::PriorityFifo0:
@@ -231,6 +227,7 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     }
     filter.FilterActivation = CAN_FILTER_ENABLE;
 
+    // id1/id2 按所选 ID 类型限幅：超出即配置非法，不截断。
     const std::uint32_t id_limit = extended ? extended_id_limit : standard_id_limit;
     if (request.id1 > id_limit || request.id2 > id_limit)
         return Status::InvalidConfiguration;
@@ -239,10 +236,11 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     {
         case FilterMode::Mask:
         {
-            // One 32-bit mask bank. The key hashes the identifier only: IDE is
-            // compared against the requested type so a standard filter cannot
-            // capture extended frames, and RTR stays unmasked so data and
-            // remote frames of that identifier both match.
+            // 使用一个 32 位 mask bank。key 只对标识符做哈希：IDE 按请求的类型
+            // 比较（标准滤波器因此无法捕获扩展帧），RTR 始终不参与屏蔽，所以同一
+            // 标识符的数据帧与远程帧都会匹配。
+            // 掩码低半字额外或上 filter_32_ide：IDE 位不在标识符位域内，必须由
+            // 掩码显式选中才会参与比较（id2 本身可能未置该位）。
             const std::uint32_t id_key = extended
                 ? (request.id1 << filter_32_ext_shift) | filter_32_ide
                 : request.id1 << filter_32_id_shift;
@@ -262,10 +260,9 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
         {
             if (!extended)
             {
-                // Two exact standard identifiers in the two 16-bit mask entries
-                // of one bank. The 16-bit key is STID<<5 | RTR<<4 | IDE<<3, so
-                // comparing the identifier bits plus IDE keeps extended frames
-                // out while data and remote frames both match.
+                // 在一个 bank 的两个 16 位 mask 项里放两个精确的标准标识符。16
+                // 位 key 为 STID<<5 | RTR<<4 | IDE<<3，因此比较标识符位加 IDE 位
+                // 既排除扩展帧，又让数据帧与远程帧都匹配（RTR 位被掩码忽略）。
                 filter.FilterScale      = CAN_FILTERSCALE_16BIT;
                 filter.FilterMode       = CAN_FILTERMODE_IDMASK;
                 filter.FilterIdLow      = static_cast<std::uint16_t>(request.id1
@@ -277,10 +274,8 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
             }
             else
             {
-                // A 16-bit bank compares only EXID[28:15] (14 bits) of an
-                // extended ID, so two different 29-bit IDs cannot both be
-                // matched exactly: that request is refused instead of being
-                // widened.
+                // 16 位 bank 只比较扩展 ID 的 EXID[28:15]（共 14 位），两个不同的
+                // 29 位 ID 无法同时精确匹配，因此该请求被拒绝，而不是放宽匹配范围。
                 if (request.id1 != request.id2)
                     return Status::Unsupported;
 
@@ -299,7 +294,7 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
         }
         case FilterMode::Range:
         case FilterMode::RangeWithoutExtendedMask:
-            return Status::Unsupported; // Inclusion ranges are an FDCAN filter mode.
+            return Status::Unsupported; // 区间过滤是 FDCAN 才有的滤波模式。
         default:
             return Status::InvalidArgument;
     }
@@ -307,7 +302,9 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     return apply_bank(handle, filter);
 }
 
-/// BankFilter: the four hardware halfwords are written verbatim.
+/// BankFilter：四个硬件半字原样写入，因此硬件可表达的任何 IDE/RTR/scale/mode
+/// 组合都不会在本层被解释、丢弃或改写；index 仍受本域 bank 数量限制，scale/
+/// mode/fifo/enabled 也只做合法性检查后直通。
 [[nodiscard]] Status configure_raw_bank(CAN_HandleTypeDef& handle,
                                         const BankFilter&   request) noexcept
 {
@@ -366,20 +363,21 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     return apply_bank(handle, filter);
 }
 
-} // namespace
+} // 匿名命名空间
 
 Status Can::start_hardware() noexcept
 {
     if (handle_.Instance == nullptr || !IS_CAN_ALL_INSTANCE(handle_.Instance))
         return Status::InvalidState;
 
-    // Only an initialized but not yet started peripheral may be claimed. A
-    // handle that is already listening belongs to somebody else's start; it is
-    // refused here so rollback_start() can never stop it.
+    // 只允许认领已初始化但尚未启动的外设。已处于监听状态的 handle 属于别人的
+    // start()，此处拒绝，以保证 rollback_start() 绝不会把它停掉。
     if (handle_.State != HAL_CAN_STATE_READY)
         return Status::InvalidState;
 
-    // HAL allows callbacks to be installed in the READY state only.
+    // HAL 只允许在 READY 状态安装回调。FIFO0/FIFO1 接收回调无条件注册；注册失败
+    // 直接返回 HardwareError，此时 hardware_started_ 仍为 false，因此调用方的
+    // rollback_start() 不会去动外设。
     if (HAL_CAN_RegisterCallback(&handle_, HAL_CAN_RX_FIFO0_MSG_PENDING_CB_ID, rx_fifo0_irq) !=
             HAL_OK ||
         HAL_CAN_RegisterCallback(&handle_, HAL_CAN_RX_FIFO1_MSG_PENDING_CB_ID, rx_fifo1_irq) !=
@@ -388,8 +386,8 @@ Status Can::start_hardware() noexcept
 
     if (Can::tx_queue_capacity > 0U)
     {
-        // A completion, an abort or an error (bus-off) frees a mailbox and may
-        // push the software queue forward.
+        // 发送完成或发送中止会释放对应邮箱；错误/bus-off 状态迁移也可能让待发邮箱
+        // 被中止而释放。任一邮箱被释放都可能推动软件队列前进，故三类通知一并注册。
         constexpr HAL_CAN_CallbackIDTypeDef tx_callbacks[] = {
             HAL_CAN_TX_MAILBOX0_COMPLETE_CB_ID, HAL_CAN_TX_MAILBOX1_COMPLETE_CB_ID,
             HAL_CAN_TX_MAILBOX2_COMPLETE_CB_ID, HAL_CAN_TX_MAILBOX0_ABORT_CB_ID,
@@ -400,26 +398,24 @@ Status Can::start_hardware() noexcept
                 return Status::HardwareError;
     }
 
-    // Enter the normal mode. Timing, GPIO and MSP init stay the board's job;
-    // the INRQ/INAK handshake may wait, so interrupts must be available here.
+    // 进入正常模式。时序、GPIO 与 MSP 初始化由板级负责；INRQ/INAK 握手需要等待，
+    // 因此此处必须允许中断才能让 HAL 的超时推进。
     if (HAL_CAN_Start(&handle_) != HAL_OK)
         return Status::HardwareError;
 
-    // From here on the peripheral was started by this instance (and only now
-    // may rollback_start() stop it).
+    // 从这里起该外设由本实例启动，也只有此时 rollback_start() 才允许停止它。
     hardware_started_ = true;
     return Status::Ok;
 }
 
 Status Can::enable_notifications() noexcept
 {
-    // Called with interrupts masked: every call below is a plain register
-    // write and never waits.
+    // 调用时中断已被屏蔽：下面每个 HAL 调用都是纯寄存器写入，绝不等待。
     std::uint32_t interrupts = CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING;
     if (Can::tx_queue_capacity > 0U)
     {
-        // Mailbox-empty pushes the software queue; bus-off and the error state
-        // transitions abort pending mailboxes, which frees them as well.
+        // 邮箱空会推动软件队列前进；bus-off 与错误状态迁移可能中止待发邮箱，
+        // 同样释放邮箱并推动队列，因此一并使能相应中断源。
         interrupts |= CAN_IT_TX_MAILBOX_EMPTY | CAN_IT_ERROR | CAN_IT_BUSOFF |
                       CAN_IT_ERROR_WARNING | CAN_IT_ERROR_PASSIVE;
     }
@@ -431,9 +427,11 @@ Status Can::enable_notifications() noexcept
 
 void Can::rollback_start() noexcept
 {
-    // Nothing was started by this instance: leave the peripheral alone.
+    // 本实例没有启动过任何东西：不动外设（它可能属于其他 owner）。
     if (!hardware_started_)
         return;
+    // 先清标志保证可重入/幂等；随后无条件关闭本后端可能开启的全部通知位（不依赖
+    // 队列容量配置），并停止外设。返回值被忽略：失败时也没有可做的补偿动作。
     hardware_started_ = false;
 
     (void)HAL_CAN_DeactivateNotification(&handle_,
@@ -447,19 +445,20 @@ void Can::rollback_start() noexcept
 
 Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
 {
-    // send() runs this capability gate after the common frame validation; FD
-    // only features are refused here instead of being silently dropped.
+    // send() 在公共帧校验之后调用此能力闸门；仅 FDCAN 才有的特性在这里明确拒绝，
+    // 而不是被静默丢弃或降级。
     if (frame.header.format != FrameFormat::Classic)
         return Status::Unsupported;
     if (frame.header.bit_rate_switch || frame.header.error_state_indicator)
         return Status::Unsupported;
 
+    // 标识符范围按 id_type 检查（标准 11 位 / 扩展 29 位）。
     if (!is_valid_id(frame.header.id_type, frame.header.id))
         return Status::InvalidArgument;
 
     if (frame.header.type == FrameType::Remote)
     {
-        // A remote frame requests up to 8 bytes; it carries no payload.
+        // 远程帧用 remote_length 请求最多 8 字节，本身不携带载荷，因此 data 必须为空。
         if (frame.header.remote_length > max_data_length || !frame.data.empty())
             return Status::InvalidArgument;
     }
@@ -473,22 +472,22 @@ Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
 
 Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
 {
-    // The common layer only hands validated frames to the backend (send() runs
-    // validate_frame + validate_hardware_frame, flush_tx replays frames that
-    // were validated when they were queued), so what remains here is the
-    // hardware state and capability of the moment.
+    // 公共层只把手校验过的帧交给后端（send() 会执行 validate_frame +
+    // validate_hardware_frame；flush_tx 重放的是入队时即已校验的帧），因此这里只需
+    // 检查当前时刻的硬件状态与能力。
 
-    // A READY peripheral is still in initialization mode: the HAL would accept
-    // the frame and report success without a running bus, so only LISTENING is
-    // writable.
+    // READY 的外设仍处于初始化模式：此时 HAL 会接受该帧并报告成功，但总线上不会
+    // 发出任何东西，因此只有 LISTENING 状态可写。
     if (handle_.State != HAL_CAN_STATE_LISTENING)
         return Status::InvalidState;
 
-    // Bus-off is latched until the node recovers; a frame submitted now would
-    // never leave the mailbox.
+    // Bus-off 被锁存直到节点恢复；此时提交的帧永远出不了邮箱，故直接返回 BusOff。
     if ((handle_.Instance->ESR & CAN_ESR_BOFF) != 0U)
         return Status::BusOff;
 
+    // 邮箱全满则本层无法提交；帧仍归属公共软件队列，由后续通知推动重试。空闲邮箱
+    // 由 HAL/硬件在三个邮箱中挑选，且帧真正上总线的先后由标识符仲裁决定，因此本层
+    // 不保证实际发送顺序与软件提交顺序一致。
     if (HAL_CAN_GetTxMailboxesFreeLevel(&handle_) == 0U)
         return Status::Busy;
 
@@ -509,11 +508,10 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
     header.DLC = header.RTR == CAN_RTR_REMOTE ? frame.header.remote_length
                                               : static_cast<std::uint32_t>(frame.data.size());
 
-    // HAL_CAN_AddTxMessage() reads eight data bytes unconditionally. A full
-    // 8-byte payload is handed over without a copy, and so is padded storage
-    // (backed by a StoredFrame whose readable tail is initialized). Short
-    // spans and remote frames, which carry no payload at all, are staged in a
-    // zeroed buffer.
+    // HAL_CAN_AddTxMessage() 无条件读取 8 个数据字节。完整 8 字节载荷直接零拷贝
+    // 传入，padded_storage 帧也一样（其背后是 StoredFrame，可读尾部已初始化）。
+    // 短 span 以及不携带任何载荷的远程帧则先暂存到清零缓冲，保证被读取的 8 字节
+    // 全部已定义。
     std::uint8_t        staging[max_data_length] = {};
     const std::uint8_t* data                     = staging;
     if (header.RTR == CAN_RTR_DATA && frame.data.data() != nullptr &&
@@ -523,8 +521,8 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
     }
     else
     {
-        // Bounded by the validated payload length; a longer span could only
-        // come from a caller that bypassed the common validation.
+        // 拷贝量由已校验的载荷长度决定并受 8 字节上限约束；更长的 span 只可能来自
+        // 绕过公共校验的调用方，此时多余部分不会被读入暂存缓冲。
         const std::size_t payload = frame.data.size() < max_data_length ? frame.data.size()
                                                                        : max_data_length;
         for (std::size_t i = 0; i < payload; ++i)
@@ -540,7 +538,7 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
 
 Status Can::read(const std::uint32_t location, StoredFrame& frame) noexcept
 {
-    // location is the bxCAN Rx FIFO index (CAN_RX_FIFO0 / CAN_RX_FIFO1).
+    // location 是 bxCAN 的 Rx FIFO 索引（CAN_RX_FIFO0 / CAN_RX_FIFO1）。
     if (location != static_cast<std::uint32_t>(CAN_RX_FIFO0) &&
         location != static_cast<std::uint32_t>(CAN_RX_FIFO1))
         return Status::InvalidArgument;
@@ -548,6 +546,10 @@ Status Can::read(const std::uint32_t location, StoredFrame& frame) noexcept
     if (HAL_CAN_GetRxFifoFillLevel(&handle_, location) == 0U)
         return Status::Empty;
 
+    // HAL_CAN_GetRxMessage() 无条件向缓冲写入 8 个数据字节，因此这里直接以
+    // StoredFrame::data 作为接收缓冲：它在编译期就有 Can::MaxDataLength（经典 CAN
+    // 为 8）字节，无需额外暂存。未被本帧使用的尾部会残留上一次内容，但不会通过
+    // frame.length 暴露出去。
     CAN_RxHeaderTypeDef header{};
     if (HAL_CAN_GetRxMessage(&handle_, location, &header, frame.data.data()) != HAL_OK)
         return Status::HardwareError;
@@ -559,13 +561,14 @@ Status Can::read(const std::uint32_t location, StoredFrame& frame) noexcept
     out.id           = out.id_type == IdType::Extended ? header.ExtId : header.StdId;
     out.type         = header.RTR == CAN_RTR_REMOTE ? FrameType::Remote : FrameType::Data;
 
-    // bxCAN reports the raw DLC nibble, which is only representable up to 8.
+    // bxCAN 上报原始 DLC 半字节，只有 ≤8 的值有效。HAL 已把 ≥8 截断为 8，这里再
+    // 做一次防御性截断，保证长度字段始终落在经典 CAN 可表达的范围内。
     const std::uint8_t length = header.DLC > max_data_length
                                     ? static_cast<std::uint8_t>(max_data_length)
                                     : static_cast<std::uint8_t>(header.DLC);
     if (out.type == FrameType::Remote)
     {
-        // Remote frames request length; they carry no payload bytes.
+        // 远程帧只请求长度、不携带载荷字节：长度写入 remote_length，payload 长度为 0。
         out.remote_length = length;
         frame.length      = 0U;
     }
@@ -583,17 +586,16 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
     if (handle_.Instance == nullptr || !IS_CAN_ALL_INSTANCE(handle_.Instance))
         return Status::InvalidConfiguration;
 
-    // Filter banks may only be programmed before the bus is started: a
-    // LISTENING handle - even one started by another owner - must not be
-    // touched, and a RESET handle means HAL_CAN_Init() has not run yet.
+    // 滤波器 bank 只允许在总线启动之前编程：LISTENING 的 handle（即便由其他 owner
+    // 启动）绝不能被触碰；RESET 的 handle 说明 HAL_CAN_Init() 尚未执行。注意 HAL
+    // 自身也允许在 LISTENING 下改滤波器，这里的更严格限制是本驱动的策略。
     if (handle_.State != HAL_CAN_STATE_READY)
         return Status::InvalidState;
 
 #if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
-    // Banks and the CAN1/CAN2 boundary sit in one shared register block, so
-    // every shared-domain write must happen before either bus of the pair is
-    // started. shared_filter_bus_started() only reports the *other* registered
-    // Can; this instance is still pre-start here.
+    // bank 与 CAN1/CAN2 分界位于同一共享寄存器块中，因此共享域的每次写入都必须
+    // 发生在该对总线任一条启动之前。shared_filter_bus_started() 只报告*另外*的已
+    // 注册 Can；此处本实例仍处于启动前。
     if (has_shared_filter_banks(handle_) && shared_filter_bus_started(handle_))
         return Status::InvalidState;
 #endif
@@ -601,17 +603,18 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
     if (const auto* split = std::get_if<FilterBankSplit>(&config))
     {
 #if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
-        // A single-controller part (and CAN3) owns a fixed 14-bank domain, so
-        // there is no boundary to move.
+        // 单控制器型号（以及 CAN3）拥有固定的 14 bank 域，没有可移动的分界。
         if (!has_shared_filter_banks(handle_))
             return Status::Unsupported;
-        // CAN2SB = 0 is legal: the whole domain then belongs to CAN2. The upper
-        // bound is the number of banks the shared domain has.
+        // CAN2SB = 0 合法：此时整个域都归 CAN2。上界为共享域的 bank 总数。
         if (split->first_can2_bank >= CAN_DRIVER_BXCAN_SHARED_FILTER_BANK_COUNT)
             return Status::OutOfRange;
 
-        // Short register sequence, no HAL waiting; the caller (common
-        // configure_filter()) already runs this under the configuration guard.
+        // 直接操作 FMR：先置 FINIT 进入滤波器初始化模式，再改写 CAN2SB 分界，最后
+        // 清 FINIT。刻意不走 HAL（HAL 会用 SlaveStartFilterBank 重写分界），以免
+        // 同时改动 bank 内容；MODIFY_REG 保持 CAN2SB 以外的 FMR 位不变。纯寄存器
+        // 短序列，无需等待 HAL；调用方（公共 configure_filter()）已在配置互斥保护
+        // 下调用，因此这里无需再加锁。
         CAN_TypeDef* const master = filter_master(handle_);
         master->FMR |= CAN_FMR_FINIT;
         MODIFY_REG(master->FMR,
@@ -631,24 +634,30 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
     if (const auto* bank_filter = std::get_if<BankFilter>(&config))
         return configure_raw_bank(handle_, *bank_filter);
 
-    // GlobalFilter and ExtendedIdMask describe FDCAN acceptance rules.
+    // GlobalFilter 与 ExtendedIdMask 描述的是 FDCAN 的接收规则，bxCAN 无对应物。
     return Status::Unsupported;
 }
 
+/// HAL 接收回调（FIFO0）的桥接：按 HAL handle 反查已注册的 Can 实例，若该 handle
+/// 尚未被任何实例认领则忽略。运行在中断上下文，实际取帧与用户回调派发由
+/// on_receive() -> read() 完成。
 void Can::rx_fifo0_irq(NativeHandle* handle)
 {
     Can* const bus = find(handle);
     if (bus != nullptr)
-        bus->on_receive(0U); // CAN_RX_FIFO0
+        bus->on_receive(0U); // 对应 CAN_RX_FIFO0，即接收 FIFO0。
 }
 
+/// HAL 接收回调（FIFO1）的桥接，行为同 rx_fifo0_irq()。
 void Can::rx_fifo1_irq(NativeHandle* handle)
 {
     Can* const bus = find(handle);
     if (bus != nullptr)
-        bus->on_receive(1U); // CAN_RX_FIFO1
+        bus->on_receive(1U); // 对应 CAN_RX_FIFO1，即接收 FIFO1。
 }
 
+/// Tx 相关回调（邮箱完成/中止、错误）共用的桥接：在中断上下文中让实例推进软件
+/// 发送队列；未认领的 handle 被忽略。
 void Can::tx_irq(NativeHandle* handle)
 {
     Can* const bus = find(handle);
@@ -656,6 +665,6 @@ void Can::tx_irq(NativeHandle* handle)
         bus->on_tx_available();
 }
 
-} // namespace bsp::can
+} // 命名空间 bsp::can
 
-#endif // !CAN_DRIVER_FDCAN
+#endif // !CAN_DRIVER_FDCAN：bxCAN 后端。
