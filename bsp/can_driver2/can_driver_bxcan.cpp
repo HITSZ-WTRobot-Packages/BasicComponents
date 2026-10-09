@@ -8,13 +8,19 @@
  * 支持的硬件配置：
  * - 只支持经典 CAN 2.0A/B 帧；FD 格式（以及其 BRS/ESI 标志）以
  *   Status::Unsupported 拒绝，而不是降级发送。
- * - 载荷上限 8 字节。HAL_CAN_AddTxMessage()/HAL_CAN_GetRxMessage() 总是搬运
- *   8 个字节，因此远程帧和调用方传入的短 span 会先经一个清零的 8 字节缓冲暂存，
- *   而 padded_storage 帧（背后是 StoredFrame，其可读尾部已初始化）直接交给 HAL。
+ * - 载荷上限 8 字节。TX 侧：HAL_CAN_AddTxMessage() 总是搬运 8 个字节，因此远程帧
+ *   和调用方传入的短 span 会先经一个清零的 8 字节缓冲暂存，而 padded_storage 帧
+ *   （背后是 StoredFrame，其可读尾部已初始化）直接交给 HAL。
+ * - RX 侧：HAL_CAN_GetRxMessage() 同样无条件写满 8 个字节，因此 read() 直接写入
+ *   调用方提供的、至少 MaxDataLength 字节的非空缓冲，并让 FrameView::data 借用其
+ *   中的有效前缀（不拷贝、不清零）。该缓冲归调用方所有，视图只在缓冲被复用或销毁
+ *   前有效；on_receive() 每轮复用它，故视图仅在本次回调期间有效。
  * - 三个 Tx 邮箱；邮箱全满返回 Status::Busy，该帧仍归属公共软件队列。本层不会
  *   自行重试：软件队列只由邮箱空/中止/错误通知推动前进。
- * - Bus-off 由 CAN_ESR.BOFF 锁存，节点恢复前一直返回 Status::BusOff
- *   （恢复动作由板级负责）。
+ * - Bus-off 由 ESR.BOFF 锁存，节点恢复前 write() 一直返回 Status::BusOff（恢复
+ *   动作由板级负责）。该判断用 __HAL_CAN_GET_FLAG(CAN_FLAG_BOF) 实时读回 ESR，
+ *   而不是读 HAL_CAN_GetError() 的错误码缓存——后者只在 HAL 的中断/错误回调路径
+ *   更新，可能落后于硬件；错误通知仅负责推动软件队列，二者互不替代。
  *
  * 滤波器即原始 bxCAN bank：
  * - IdFilter::Mask 映射到一个 32 位 mask bank（比较标识符位，IDE 固定为请求的
@@ -27,16 +33,31 @@
  * - Range/FD 专属动作（Priority、RxBuffer 等）、GlobalFilter 与 ExtendedIdMask
  *   在 bxCAN 上没有对应物，返回 Status::Unsupported。
  *
+ * 滤波器编程完全由 HAL 主导：本后端不直接写任何滤波器寄存器（FMR/FM1R/FS1R/
+ * FFA1R/FA1R/FR1/FR2），一律经 HAL_CAN_ConfigFilter() 完成；由于该函数每次都会
+ * 用 CAN_FilterTypeDef::SlaveStartFilterBank 重写 FMR.CAN2SB，普通 bank 配置都
+ * 会携带当前 FMR 中的边界值，因此不会把 FilterBankSplit() 设定的分界悄悄复位。
  * 在 CAN1/CAN2 共用 28 个 bank 的型号上，滤波器寄存器始终通过 CAN1（主控）访问，
- * 即使是 CAN2 的 handle 也一样；因此主实例也必须被初始化（有时钟）。每次调用
- * HAL_CAN_ConfigFilter() 都会用 CAN_FilterTypeDef::SlaveStartFilterBank 重写
- * FMR.CAN2SB，所以这里写入的每个 bank 都携带当前 FMR 中的边界值——通过
- * FilterBankSplit() 配置的分界不会被悄悄复位。bank 归属（bank < CAN2SB 属于
- * CAN1，其余属于 CAN2）由调用方显式决定：索引按给定值写入。
+ * 即使是 CAN2 的 handle 也一样；因此主实例也必须被初始化（有时钟）。bank 归属
+ * （bank < CAN2SB 属于 CAN1，其余属于 CAN2）由调用方显式决定：索引按给定值写入。
+ *
+ * HAL 没有读取 FMR.CAN2SB 的 getter，因此这里保留唯一必要的硬件读回：读取
+ * FMR.CAN2SB 以获得当前分界（普通 bank 配置需要它来保持分界不变），以及在
+ * FilterBankSplit 改界时快照共享 master 的 bank 0（FS1R/FM1R/FFA1R/FA1R/FR1/
+ * FR2）。除此之外本后端不直接读硬件状态（Bus-off 等一律走 HAL 宏/API，见
+ * write()）。
+ *
+ * FilterBankSplit 的分界改动是一次 setup 阶段副作用：HAL 只用
+ * SlaveStartFilterBank 重写 CAN2SB，因此改界时先把共享 master 的 bank 0 逐位
+ * 读回、按 HAL 的编码反向构造出等价的 CAN_FilterTypeDef，再让 HAL 以新的
+ * SlaveStartFilterBank 重新应用同一 bank，从而只改分界、逐位保留 bank 0 与所有
+ * 其他 bank 的内容；若请求分界与当前分界相同则直接返回 Ok，不做任何重编程。这里
+ * 不引入任何类内缓存：每次都以硬件当前值为准，避免与外部 HAL 配置脱同步。
+ *
  * 共享域中的每个 bank 以及分界本身都必须在 CAN1/CAN2 这对总线的任一条启动之前
  * 配置完成：若另一条已注册总线正在运行，则共享域写入会被拒绝
  * （Status::InvalidState），以保证本实例不会在一条活跃总线之下进入共享滤波器
- * 初始化模式。
+ * 初始化模式。CAN3 拥有自有的 14 个 bank，不受该约束。
  */
 
 #include "can_driver.hpp"
@@ -363,6 +384,59 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     return apply_bank(handle, filter);
 }
 
+#if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
+/// 以新的 CAN1/CAN2 分界重新应用共享 master 的 bank 0。
+///
+/// HAL 没有 CAN2SB 的 setter，只有 HAL_CAN_ConfigFilter() 会以
+/// SlaveStartFilterBank 重写分界。为了只改分界而不破坏任何 bank 内容，这里先把
+/// master 的 bank 0 逐位快照（scale/mode/fifo/activation 与 FR1/FR2），按 HAL 的
+/// 编码反向推导出等价的 CAN_FilterTypeDef，再交由 HAL 重新应用同一 bank：bank 0
+/// 的位布局与使能状态被逐位还原，其余 bank 完全不碰，仅 FMR.CAN2SB 被更新。这是
+/// 唯一一处为改界而读回滤波器硬件的地方，且不保留任何缓存。
+[[nodiscard]] Status reapply_shared_split(CAN_HandleTypeDef& handle,
+                                         const std::uint32_t first_can2_bank) noexcept
+{
+    CAN_TypeDef* const   master   = filter_master(handle);
+    const std::uint32_t  bank_bit = 1U << 0U; // FilterBank0：bank 0 在 *1R 中的位。
+
+    const std::uint32_t fr1 = master->sFilterRegister[0].FR1;
+    const std::uint32_t fr2 = master->sFilterRegister[0].FR2;
+
+    // 所有字段都显式赋值：HAL 会读取结构体的每一个字段。
+    CAN_FilterTypeDef filter{};
+    filter.FilterBank           = 0U;
+    filter.SlaveStartFilterBank = first_can2_bank;
+
+    if ((master->FS1R & bank_bit) != 0U)
+    {
+        // 32 位 scale：FR1 = IdHigh<<16 | IdLow，FR2 = MaskHigh<<16 | MaskLow。
+        filter.FilterScale      = CAN_FILTERSCALE_32BIT;
+        filter.FilterIdLow      = fr1 & 0xFFFFU;
+        filter.FilterIdHigh     = (fr1 >> 16U) & 0xFFFFU;
+        filter.FilterMaskIdLow  = fr2 & 0xFFFFU;
+        filter.FilterMaskIdHigh = (fr2 >> 16U) & 0xFFFFU;
+    }
+    else
+    {
+        // 16 位 scale：FR1 = MaskLow<<16 | IdLow，FR2 = MaskHigh<<16 | IdHigh。
+        filter.FilterScale      = CAN_FILTERSCALE_16BIT;
+        filter.FilterIdLow      = fr1 & 0xFFFFU;
+        filter.FilterMaskIdLow  = (fr1 >> 16U) & 0xFFFFU;
+        filter.FilterIdHigh     = fr2 & 0xFFFFU;
+        filter.FilterMaskIdHigh = (fr2 >> 16U) & 0xFFFFU;
+    }
+
+    filter.FilterMode = (master->FM1R & bank_bit) != 0U ? CAN_FILTERMODE_IDLIST
+                                                        : CAN_FILTERMODE_IDMASK;
+    filter.FilterFIFOAssignment =
+        (master->FFA1R & bank_bit) != 0U ? CAN_FILTER_FIFO1 : CAN_FILTER_FIFO0;
+    filter.FilterActivation =
+        (master->FA1R & bank_bit) != 0U ? CAN_FILTER_ENABLE : CAN_FILTER_DISABLE;
+
+    return apply_bank(handle, filter);
+}
+#endif
+
 } // 匿名命名空间
 
 Status Can::start_hardware() noexcept
@@ -384,7 +458,7 @@ Status Can::start_hardware() noexcept
             HAL_OK)
         return Status::HardwareError;
 
-    if (Can::tx_queue_capacity > 0U)
+    if (Can::TxQueueCapacity > 0U)
     {
         // 发送完成或发送中止会释放对应邮箱；错误/bus-off 状态迁移也可能让待发邮箱
         // 被中止而释放。任一邮箱被释放都可能推动软件队列前进，故三类通知一并注册。
@@ -412,7 +486,7 @@ Status Can::enable_notifications() noexcept
 {
     // 调用时中断已被屏蔽：下面每个 HAL 调用都是纯寄存器写入，绝不等待。
     std::uint32_t interrupts = CAN_IT_RX_FIFO0_MSG_PENDING | CAN_IT_RX_FIFO1_MSG_PENDING;
-    if (Can::tx_queue_capacity > 0U)
+    if (Can::TxQueueCapacity > 0U)
     {
         // 邮箱空会推动软件队列前进；bus-off 与错误状态迁移可能中止待发邮箱，
         // 同样释放邮箱并推动队列，因此一并使能相应中断源。
@@ -459,10 +533,10 @@ Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
     if (frame.header.type == FrameType::Remote)
     {
         // 远程帧用 remote_length 请求最多 8 字节，本身不携带载荷，因此 data 必须为空。
-        if (frame.header.remote_length > max_data_length || !frame.data.empty())
+        if (frame.header.remote_length > MaxDataLength || !frame.data.empty())
             return Status::InvalidArgument;
     }
-    else if (frame.data.size() > max_data_length)
+    else if (frame.data.size() > MaxDataLength)
     {
         return Status::InvalidArgument;
     }
@@ -482,7 +556,9 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
         return Status::InvalidState;
 
     // Bus-off 被锁存直到节点恢复；此时提交的帧永远出不了邮箱，故直接返回 BusOff。
-    if ((handle_.Instance->ESR & CAN_ESR_BOFF) != 0U)
+    // 这里用 CAN_FLAG_BOF 实时读回 ESR.BOFF，而不是读 HAL_CAN_GetError() 的错误码
+    // 缓存——该缓存只在 HAL 的中断/错误回调路径更新，可能落后于硬件。
+    if (__HAL_CAN_GET_FLAG(&handle_, CAN_FLAG_BOF) != RESET)
         return Status::BusOff;
 
     // 邮箱全满则本层无法提交；帧仍归属公共软件队列，由后续通知推动重试。空闲邮箱
@@ -512,10 +588,10 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
     // 传入，padded_storage 帧也一样（其背后是 StoredFrame，可读尾部已初始化）。
     // 短 span 以及不携带任何载荷的远程帧则先暂存到清零缓冲，保证被读取的 8 字节
     // 全部已定义。
-    std::uint8_t        staging[max_data_length] = {};
+    std::uint8_t        staging[MaxDataLength] = {};
     const std::uint8_t* data                     = staging;
     if (header.RTR == CAN_RTR_DATA && frame.data.data() != nullptr &&
-        (padded_storage || frame.data.size() == max_data_length))
+        (padded_storage || frame.data.size() == MaxDataLength))
     {
         data = frame.data.data();
     }
@@ -523,8 +599,8 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
     {
         // 拷贝量由已校验的载荷长度决定并受 8 字节上限约束；更长的 span 只可能来自
         // 绕过公共校验的调用方，此时多余部分不会被读入暂存缓冲。
-        const std::size_t payload = frame.data.size() < max_data_length ? frame.data.size()
-                                                                       : max_data_length;
+        const std::size_t payload = frame.data.size() < MaxDataLength ? frame.data.size()
+                                                                       : MaxDataLength;
         for (std::size_t i = 0; i < payload; ++i)
             staging[i] = frame.data[i];
     }
@@ -536,22 +612,31 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
     return Status::Ok;
 }
 
-Status Can::read(const std::uint32_t location, StoredFrame& frame) noexcept
+Status Can::read(const std::uint32_t location, const std::span<std::uint8_t> buffer,
+                 FrameView& frame) noexcept
 {
     // location 是 bxCAN 的 Rx FIFO 索引（CAN_RX_FIFO0 / CAN_RX_FIFO1）。
     if (location != static_cast<std::uint32_t>(CAN_RX_FIFO0) &&
         location != static_cast<std::uint32_t>(CAN_RX_FIFO1))
         return Status::InvalidArgument;
 
+    // HAL_CAN_GetRxMessage() 无条件向缓冲写入 8 个数据字节，因此必须在任何 HAL 访问
+    // 或消费之前确认缓冲至少能容纳一个最大长度帧，否则拒绝而不是越界写。
+    if (buffer.data() == nullptr || buffer.size() < MaxDataLength)
+        return Status::InvalidArgument;
+
+    // 非 Ok 返回一律不得让调用方看到可交付的数据视图。
+    frame.data = {};
+
     if (HAL_CAN_GetRxFifoFillLevel(&handle_, location) == 0U)
         return Status::Empty;
 
-    // HAL_CAN_GetRxMessage() 无条件向缓冲写入 8 个数据字节，因此这里直接以
-    // StoredFrame::data 作为接收缓冲：它在编译期就有 Can::MaxDataLength（经典 CAN
-    // 为 8）字节，无需额外暂存。未被本帧使用的尾部会残留上一次内容，但不会通过
-    // frame.length 暴露出去。
+    // HAL_CAN_GetRxMessage() 无条件向缓冲写入 8 个数据字节，因此直接以调用方提供的
+    // 最大长度缓冲作为接收缓冲：其可写空间已在上方验证，无需额外暂存，也不经过
+    // FrameView::data（后者是只读视图）。未被本帧使用的尾部会残留上一次内容，但不
+    // 会通过 frame.data 的长度暴露出去。
     CAN_RxHeaderTypeDef header{};
-    if (HAL_CAN_GetRxMessage(&handle_, location, &header, frame.data.data()) != HAL_OK)
+    if (HAL_CAN_GetRxMessage(&handle_, location, &header, buffer.data()) != HAL_OK)
         return Status::HardwareError;
 
     FrameHeader& out = frame.header;
@@ -563,19 +648,21 @@ Status Can::read(const std::uint32_t location, StoredFrame& frame) noexcept
 
     // bxCAN 上报原始 DLC 半字节，只有 ≤8 的值有效。HAL 已把 ≥8 截断为 8，这里再
     // 做一次防御性截断，保证长度字段始终落在经典 CAN 可表达的范围内。
-    const std::uint8_t length = header.DLC > max_data_length
-                                    ? static_cast<std::uint8_t>(max_data_length)
+    const std::uint8_t length = header.DLC > MaxDataLength
+                                    ? static_cast<std::uint8_t>(MaxDataLength)
                                     : static_cast<std::uint8_t>(header.DLC);
     if (out.type == FrameType::Remote)
     {
         // 远程帧只请求长度、不携带载荷字节：长度写入 remote_length，payload 长度为 0。
         out.remote_length = length;
-        frame.length      = 0U;
+        frame.data        = {};
     }
     else
     {
         out.remote_length = 0U;
-        frame.length      = length;
+        // 数据视图直接借用调用方缓冲的有效前缀，不做任何载荷拷贝或清零；该视图仅
+        // 在 buffer 被复用或销毁前有效（回调期间由调用方保证）。
+        frame.data = std::span<const std::uint8_t>{ buffer.data(), length };
     }
 
     return Status::Ok;
@@ -610,18 +697,15 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
         if (split->first_can2_bank >= CAN_DRIVER_BXCAN_SHARED_FILTER_BANK_COUNT)
             return Status::OutOfRange;
 
-        // 直接操作 FMR：先置 FINIT 进入滤波器初始化模式，再改写 CAN2SB 分界，最后
-        // 清 FINIT。刻意不走 HAL（HAL 会用 SlaveStartFilterBank 重写分界），以免
-        // 同时改动 bank 内容；MODIFY_REG 保持 CAN2SB 以外的 FMR 位不变。纯寄存器
-        // 短序列，无需等待 HAL；调用方（公共 configure_filter()）已在配置互斥保护
-        // 下调用，因此这里无需再加锁。
-        CAN_TypeDef* const master = filter_master(handle_);
-        master->FMR |= CAN_FMR_FINIT;
-        MODIFY_REG(master->FMR,
-                   CAN_FMR_CAN2SB,
-                   split->first_can2_bank << CAN_FMR_CAN2SB_Pos);
-        master->FMR &= ~CAN_FMR_FINIT;
-        return Status::Ok;
+        // 分界已是目标值：无需改动任何寄存器，直接成功，避免无必要地重编程 bank 0。
+        if (can2_start_bank(handle_) == split->first_can2_bank)
+            return Status::Ok;
+
+        // 改界只能借助 HAL_CAN_ConfigFilter()（它用 SlaveStartFilterBank 重写
+        // CAN2SB）。该调用在 setup 阶段会以硬件当前值快照并原样回写 master 的
+        // bank 0，因此只改分界、不破坏任何 bank 内容。调用方（公共
+        // configure_filter()）已在配置互斥保护下调用，故此处无需再加锁。
+        return reapply_shared_split(handle_, split->first_can2_bank);
 #else
         (void)split;
         return Status::Unsupported;

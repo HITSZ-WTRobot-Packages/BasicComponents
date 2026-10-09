@@ -241,8 +241,8 @@ SendResult Can::send_result(const Status status) noexcept
     }
 }
 
-/// 由 FrameView 拷入存储：复制 header、记录 length、memcpy 负载，并按后端可读
-/// 范围对尾部补零，作为发送队列与接收暂存的统一载体。
+#if CAN_DRIVER_TX_QUEUE_SIZE > 0
+/// 将借用的 FrameView 复制为 TX 队列独立持有的一帧，并初始化 HAL 可读的尾部。
 void Can::StoredFrame::assign(const FrameView& frame) noexcept
 {
     header = frame.header;
@@ -253,13 +253,14 @@ void Can::StoredFrame::assign(const FrameView& frame) noexcept
     // bxCAN HAL 始终读取固定 8 字节；FDCAN HAL 按完整 32 位字读取，即使负载
     // 只有 1/2/3/5/6/7 字节也要读到该字末尾。故只清零 HAL 可能读到的尾部
     // （Remote 帧按 8 字节计，其余向上取整到 4 的倍数），不做多余 memset。
-    const std::size_t readable = !supports_fd || header.type == FrameType::Remote
+    const std::size_t readable = !SupportsFD || header.type == FrameType::Remote
                                          ? 8U
                                          : (static_cast<std::size_t>(length) + 3U) &
                                                    ~std::size_t{ 3 };
     if (readable > length)
         std::memset(data.data() + length, 0, readable - length);
 }
+#endif
 
 /// 在临界区内（调用方持 ISRGuard）排空发送队列：只有 write() 返回 Ok 才弹出
 /// 队首，否则原样返回状态、保留该帧以便下次重试。每帧以 padded_storage=true 写出。
@@ -326,23 +327,23 @@ void Can::on_tx_available() noexcept
 
 /// 接收中断入口。持续从指定 location（FIFO/缓冲区索引）读出帧直到无数据或出错，
 /// 使一次中断尽量排空该队列。InvalidFrame 表示后端已确认并释放该不可用帧，继续
-/// 排空而非返回。回调在本 ISR 上下文同步执行，storage 每轮复用，故 view 仅在
-/// 本次回调调用期间有效；回调表启动后不变，无需额外全局屏蔽即可安全遍历。
+/// 排空而非返回。回调在本 ISR 上下文同步执行，buffer 每轮复用，故 FrameView
+/// 仅在本次回调期间有效；回调表启动后不变，无需额外全局屏蔽即可安全遍历。
 void Can::on_receive(const std::uint32_t location) noexcept
 {
     if (!started_)
         return;
-    StoredFrame storage;
+    std::array<std::uint8_t, MaxDataLength> buffer;
+    FrameView frame;
     for (;;)
     {
-        const auto result = read(location, storage);
+        const auto result = read(location, buffer, frame);
         if (result == Status::InvalidFrame)
             continue; // 后端已确认并释放该不可用帧，继续排空。
         if (result != Status::Ok)
             return;
-        const auto frame = storage.view();
         // 回调表启动后不变；用户代码在此不额外加全局中断屏蔽，FIFO IRQ 优先级
-        // 由板级配置决定。frame 仅在本轮迭代内有效，下一轮 read 会覆盖 storage。
+        // 由板级配置决定。frame 的数据视图仅在本轮有效，下一轮 read 会覆盖 buffer。
         for (std::size_t index = 0; index < callback_count_; ++index)
             callbacks_[index].invoke(callbacks_[index], frame);
     }

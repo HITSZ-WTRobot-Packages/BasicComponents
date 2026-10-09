@@ -13,11 +13,12 @@
 
 #if CAN_DRIVER_FDCAN
 
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <type_traits>
-#include <variant>
+#    include <algorithm>
+#    include <cstddef>
+#    include <cstdint>
+#    include <cstring>
+#    include <type_traits>
+#    include <variant>
 
 namespace bsp::can
 {
@@ -26,56 +27,64 @@ namespace
 /// 无对应 FDCAN DLC 编码的字节长度的哨兵值。
 constexpr std::uint32_t invalid_dlc = 0xFFFFFFFFU;
 
-// Rx element 内各字段的掩码。它们与 HAL 内部的 FDCAN_ELEMENT_MASK_* 值一致；
-// HAL 未导出这些宏，但 message RAM 的布局属于架构规格。
-constexpr std::uint32_t element_mask_esi{0x80000000U};
-constexpr std::uint32_t element_mask_xtd{0x40000000U};
-constexpr std::uint32_t element_mask_rtr{0x20000000U};
-constexpr std::uint32_t element_mask_stdid{0x1FFC0000U};
-constexpr std::uint32_t element_mask_extid{0x1FFFFFFFU};
-constexpr std::uint32_t element_mask_dlc{0x000F0000U};
-constexpr std::uint32_t element_mask_brs{0x00100000U};
-constexpr std::uint32_t element_mask_fdf{0x00200000U};
-
-constexpr std::uint32_t extended_id_limit{0x1FFFFFFFU};
-constexpr std::uint32_t standard_id_limit{0x7FFU};
+constexpr std::uint32_t extended_id_limit{ 0x1FFFFFFFU };
+constexpr std::uint32_t standard_id_limit{ 0x7FFU };
 
 // 硬件（硅）上限，与 handle 的 Init 所声明的数量无关。
-constexpr std::uint32_t standard_filter_hardware_limit{128U};
-constexpr std::uint32_t extended_filter_hardware_limit{64U};
-constexpr std::uint32_t rx_element_hardware_limit{64U};
+constexpr std::uint32_t standard_filter_hardware_limit{ 128U };
+constexpr std::uint32_t extended_filter_hardware_limit{ 64U };
+constexpr std::uint32_t rx_element_hardware_limit{ 64U };
 
 /// 返回恰好能存放 @p length 个数据字节的 DLC 编码；直接使用 HAL 宏，不做位移。
 constexpr std::uint32_t dlc_from_length(const std::size_t length) noexcept
 {
     switch (length)
     {
-    case 0U: return FDCAN_DLC_BYTES_0;
-    case 1U: return FDCAN_DLC_BYTES_1;
-    case 2U: return FDCAN_DLC_BYTES_2;
-    case 3U: return FDCAN_DLC_BYTES_3;
-    case 4U: return FDCAN_DLC_BYTES_4;
-    case 5U: return FDCAN_DLC_BYTES_5;
-    case 6U: return FDCAN_DLC_BYTES_6;
-    case 7U: return FDCAN_DLC_BYTES_7;
-    case 8U: return FDCAN_DLC_BYTES_8;
-    case 12U: return FDCAN_DLC_BYTES_12;
-    case 16U: return FDCAN_DLC_BYTES_16;
-    case 20U: return FDCAN_DLC_BYTES_20;
-    case 24U: return FDCAN_DLC_BYTES_24;
-    case 32U: return FDCAN_DLC_BYTES_32;
-    case 48U: return FDCAN_DLC_BYTES_48;
-    case 64U: return FDCAN_DLC_BYTES_64;
-    default: return invalid_dlc;
+    case 0U:
+        return FDCAN_DLC_BYTES_0;
+    case 1U:
+        return FDCAN_DLC_BYTES_1;
+    case 2U:
+        return FDCAN_DLC_BYTES_2;
+    case 3U:
+        return FDCAN_DLC_BYTES_3;
+    case 4U:
+        return FDCAN_DLC_BYTES_4;
+    case 5U:
+        return FDCAN_DLC_BYTES_5;
+    case 6U:
+        return FDCAN_DLC_BYTES_6;
+    case 7U:
+        return FDCAN_DLC_BYTES_7;
+    case 8U:
+        return FDCAN_DLC_BYTES_8;
+    case 12U:
+        return FDCAN_DLC_BYTES_12;
+    case 16U:
+        return FDCAN_DLC_BYTES_16;
+    case 20U:
+        return FDCAN_DLC_BYTES_20;
+    case 24U:
+        return FDCAN_DLC_BYTES_24;
+    case 32U:
+        return FDCAN_DLC_BYTES_32;
+    case 48U:
+        return FDCAN_DLC_BYTES_48;
+    case 64U:
+        return FDCAN_DLC_BYTES_64;
+    default:
+        return invalid_dlc;
     }
 }
+
+/// 放在静态只读存储中，避免每次取帧时把查表数据复制到栈；每项只需一个字节。
+constexpr std::uint8_t dlc_byte_lengths[16] = { 0U, 1U,  2U,  3U,  4U,  5U,  6U,  7U,
+                                                8U, 12U, 16U, 20U, 24U, 32U, 48U, 64U };
 
 /// 返回某个 DLC 编码所表示的字节数；编码 9..15 不是线性递增的。
 constexpr std::size_t bytes_from_dlc(const std::uint32_t dlc) noexcept
 {
-    constexpr std::size_t table[16] = {0U,  1U,  2U,  3U,  4U,  5U,  6U,  7U,
-                                       8U,  12U, 16U, 20U, 24U, 32U, 48U, 64U};
-    return dlc < 16U ? table[dlc] : 0U;
+    return dlc < 16U ? dlc_byte_lengths[dlc] : 0U;
 }
 
 /// 一个由 @p words 个 32-bit word 组成的 element，在扣除其 2 word 的头部之后
@@ -87,8 +96,9 @@ constexpr std::size_t element_payload_capacity(const std::uint32_t words) noexce
 
 /// 将单个非匹配动作翻译为 HAL 取值；拒绝损坏的判别符，以及目标 FIFO 未分配
 /// element 存储空间的 accept 目标。
-Status map_non_matching(const FDCAN_HandleTypeDef& handle, const NonMatchingAction action,
-                        std::uint32_t& native) noexcept
+Status map_non_matching(const FDCAN_HandleTypeDef& handle,
+                        const NonMatchingAction    action,
+                        std::uint32_t&             native) noexcept
 {
     switch (action)
     {
@@ -122,13 +132,16 @@ Status apply_global_filter(FDCAN_HandleTypeDef& handle, const GlobalFilter& filt
     if (extended != Status::Ok)
         return extended;
 
-    const std::uint32_t reject_standard =
-            filter.reject_standard_remote ? FDCAN_REJECT_REMOTE : FDCAN_FILTER_REMOTE;
-    const std::uint32_t reject_extended =
-            filter.reject_extended_remote ? FDCAN_REJECT_REMOTE : FDCAN_FILTER_REMOTE;
+    const std::uint32_t reject_standard = filter.reject_standard_remote ? FDCAN_REJECT_REMOTE
+                                                                        : FDCAN_FILTER_REMOTE;
+    const std::uint32_t reject_extended = filter.reject_extended_remote ? FDCAN_REJECT_REMOTE
+                                                                        : FDCAN_FILTER_REMOTE;
 
-    return HAL_FDCAN_ConfigGlobalFilter(&handle, non_matching_standard, non_matching_extended,
-                                        reject_standard, reject_extended) == HAL_OK
+    return HAL_FDCAN_ConfigGlobalFilter(&handle,
+                                        non_matching_standard,
+                                        non_matching_extended,
+                                        reject_standard,
+                                        reject_extended) == HAL_OK
                    ? Status::Ok
                    : Status::HardwareError;
 }
@@ -265,10 +278,10 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
         native.FilterID2 = filter.id2;
     }
 
-    return HAL_FDCAN_ConfigFilter(&handle, &native) == HAL_OK ? Status::Ok
-                                                              : Status::HardwareError;
+    return HAL_FDCAN_ConfigFilter(&handle, &native) == HAL_OK ? Status::Ok : Status::HardwareError;
 }
-} // 匿名命名空间
+
+} // namespace
 
 /// 启动 FDCAN 外设：校验 Instance 与 READY 状态、注册全部私有回调、调用
 /// HAL_FDCAN_Start()，并记录“本次启动”以便回滚。
@@ -292,7 +305,8 @@ Status Can::start_hardware() noexcept
     const bool callbacks_installed =
             HAL_FDCAN_RegisterRxFifo0Callback(&handle_, rx_fifo0_irq) == HAL_OK &&
             HAL_FDCAN_RegisterRxFifo1Callback(&handle_, rx_fifo1_irq) == HAL_OK &&
-            HAL_FDCAN_RegisterCallback(&handle_, HAL_FDCAN_RX_BUFFER_NEW_MSG_CB_ID,
+            HAL_FDCAN_RegisterCallback(&handle_,
+                                       HAL_FDCAN_RX_BUFFER_NEW_MSG_CB_ID,
                                        rx_buffers_irq) == HAL_OK &&
             HAL_FDCAN_RegisterTxBufferCompleteCallback(&handle_, tx_buffers_irq) == HAL_OK &&
             HAL_FDCAN_RegisterTxBufferAbortCallback(&handle_, tx_buffers_irq) == HAL_OK &&
@@ -316,7 +330,7 @@ Status Can::start_hardware() noexcept
 /// 屏蔽中断。
 Status Can::enable_notifications() noexcept
 {
-    std::uint32_t active_its  = 0U;
+    std::uint32_t active_its = 0U;
     if (handle_.Init.RxFifo0ElmtsNbr > 0U)
         active_its |= FDCAN_IT_RX_FIFO0_NEW_MESSAGE;
     if (handle_.Init.RxFifo1ElmtsNbr > 0U)
@@ -327,10 +341,9 @@ Status Can::enable_notifications() noexcept
     // 软件 Tx 队列由完成/取消通知以及 Tx FIFO 空通知来推进，绝不会由后续的
     // send() 调用推进。没有软件队列时完全不需要任何 Tx 中断。
     std::uint32_t tx_buffer_mask = 0U;
-    if (tx_queue_capacity > 0U)
+    if (Can::TxQueueCapacity > 0U)
     {
-        active_its |= FDCAN_IT_TX_FIFO_EMPTY | FDCAN_IT_TX_COMPLETE |
-                      FDCAN_IT_TX_ABORT_COMPLETE;
+        active_its |= FDCAN_IT_TX_FIFO_EMPTY | FDCAN_IT_TX_COMPLETE | FDCAN_IT_TX_ABORT_COMPLETE;
         // 覆盖所有 buffer 索引；不存在的 buffer 对应位在 TXBTO/TXBCF 中永远不会
         // 置位，因此全 1 掩码只会监视那些实际参与发送的 buffer。
         tx_buffer_mask = 0xFFFFFFFFU;
@@ -392,7 +405,7 @@ Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
     if (header.type == FrameType::Remote && payload > 8U)
         return Status::InvalidConfiguration; // 远程请求的长度属于 classic DLC
 
-    if (payload > max_data_length)
+    if (payload > Can::MaxDataLength)
         return Status::Unsupported;
 
     // 发送始终经由 Tx FIFO/queue 进行。
@@ -402,8 +415,8 @@ Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
     // HAL 将负载 word 写入 Tx element 时不校验 element 尺寸，因此放不下的帧会
     // 覆写相邻的 Message RAM。要求所配置的 element 在 2 word 头部之后能容纳
     // ceil(payload/4) 个 word。
-    const std::uint32_t tx_capacity =
-            handle_.Init.TxElmtSize > 2U ? handle_.Init.TxElmtSize - 2U : 0U;
+    const std::uint32_t tx_capacity = handle_.Init.TxElmtSize > 2U ? handle_.Init.TxElmtSize - 2U
+                                                                   : 0U;
     if ((payload + 3U) / 4U > tx_capacity)
         return Status::Unsupported;
 
@@ -423,8 +436,11 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
     if (handle_.State != HAL_FDCAN_STATE_BUSY)
         return Status::HardwareError;
 
-    // BusOff 只上报、绝不自动恢复：是否重启总线由应用决定。
-    if ((handle_.Instance->PSR & FDCAN_PSR_BO) != 0U)
+    // BusOff 只上报、绝不自动恢复：是否重启总线由应用决定。经 HAL 读取协议状态，
+    // 避免手写 PSR。
+    FDCAN_ProtocolStatusTypeDef protocol_status{};
+    (void)HAL_FDCAN_GetProtocolStatus(&handle_, &protocol_status);
+    if (protocol_status.BusOff != 0U)
         return Status::BusOff;
 
     if (HAL_FDCAN_GetTxFifoFreeLevel(&handle_) == 0U)
@@ -438,18 +454,16 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
         return Status::InvalidConfiguration;
 
     FDCAN_TxHeaderTypeDef tx{};
-    tx.Identifier          = frame.header.id;
-    tx.IdType              = frame.header.id_type == IdType::Extended ? FDCAN_EXTENDED_ID
-                                                                     : FDCAN_STANDARD_ID;
+    tx.Identifier = frame.header.id;
+    tx.IdType = frame.header.id_type == IdType::Extended ? FDCAN_EXTENDED_ID : FDCAN_STANDARD_ID;
     tx.TxFrameType         = remote ? FDCAN_REMOTE_FRAME : FDCAN_DATA_FRAME;
     tx.DataLength          = dlc;
     tx.ErrorStateIndicator = frame.header.error_state_indicator ? FDCAN_ESI_PASSIVE
                                                                 : FDCAN_ESI_ACTIVE;
     tx.BitRateSwitch       = frame.header.bit_rate_switch ? FDCAN_BRS_ON : FDCAN_BRS_OFF;
-    tx.FDFormat            = frame.header.format == FrameFormat::Fd ? FDCAN_FD_CAN
-                                                                    : FDCAN_CLASSIC_CAN;
-    tx.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
-    tx.MessageMarker       = 0U;
+    tx.FDFormat = frame.header.format == FrameFormat::Fd ? FDCAN_FD_CAN : FDCAN_CLASSIC_CAN;
+    tx.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+    tx.MessageMarker      = 0U;
 
     // HAL 按 4 字节 word 复制负载，直到 DLCtoBytes[dlc]，因此长度为 4 的整数倍的
     // span 会被原样读取，而长度 1/2/3/5/6/7 时会多读到其后的至多 3 字节。远程帧
@@ -483,10 +497,12 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
 
     if (HAL_FDCAN_AddMessageToTxFifoQ(&handle_, &tx, payload) != HAL_OK)
     {
-        // 空闲级别已在上面复查，故对剩余原因进行分类。
-        if ((handle_.Instance->TXFQS & FDCAN_TXFQS_TFQF) != 0U)
+        // 空闲级别已在上面复查，故对剩余原因分类：TX 满与 BusOff 均经 HAL 读取，
+        // 不再手写 TXFQS/PSR。
+        if (HAL_FDCAN_GetTxFifoFreeLevel(&handle_) == 0U)
             return Status::Busy;
-        if ((handle_.Instance->PSR & FDCAN_PSR_BO) != 0U)
+        (void)HAL_FDCAN_GetProtocolStatus(&handle_, &protocol_status);
+        if (protocol_status.BusOff != 0U)
             return Status::BusOff;
         return Status::HardwareError;
     }
@@ -497,212 +513,132 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
 /// 从 @p location（FDCAN_RX_FIFO0/FIFO1，或专用 Rx buffer 索引）取出一个已接收
 /// 帧。要求外设处于 BUSY 状态，否则返回 HardwareError。
 ///
-/// 直接读取硬件更新的 Message RAM（volatile），不经过任何中间缓冲；取到的数据
-/// 在本次调用返回后即可被硬件覆盖，调用方必须在返回前完成消费。取帧时同步完成
-/// 出队/清标志（FIFO 写 RXFx A 寄存器，buffer 清对应 NDAT 位），因此同一 element
-/// 不会被重复取出。
+/// 唯一的取帧路径是 HAL_FDCAN_GetRxMessage()：由 HAL 完成 Message RAM 的 header/
+/// payload 复制以及出队/清标志（ack）。本驱动不再手工 peek Message RAM、解析 element、
+/// 复制负载或写入确认，因此 overwrite 与非 overwrite 不再区分，取帧与确认行为完全由
+/// HAL 决定。
 ///
-/// @retval Status::Ok            成功交付一帧有效数据
-/// @retval Status::Empty         该位置已无待取数据
-/// @retval Status::InvalidFrame  已消费并确认（acknowledge），但内容不可交付
-///                               （如 FD 远程帧、超出 element 容量的截断帧），
-///                               调用方应继续排空该位置
-Status Can::read(std::uint32_t location, StoredFrame& frame) noexcept
+/// 空判断在本函数中只做一次（先 query 再取帧），因此随后 HAL 取帧并自行确认，不会
+/// 因重复查询清掉标志而丢消息：
+///  - FIFO0/FIFO1：检查对应 Init 分配数量非 0，且 HAL_FDCAN_GetRxFifoFillLevel() 不为 0；
+///  - 专用 Rx buffer：检查 location 在 min(RxBuffersNbr, 64) 之内，且
+///    HAL_FDCAN_IsRxBufferMessageAvailable() 返回非 0。
+/// 这些判断不读取任何直接寄存器或 Message RAM。
+///
+/// @warning HAL 已知缺陷（H7）：本驱动按用户决定不修复、不区分 overwrite 模式。
+/// 当前 STM32H7 HAL 在 FIFO 已满且配置为 overwrite 时，把 get index 以
+/// `(GetIndex + 1) & ((RXFxC & RxC_S) >> RxC_S_Pos)` 回绕，即把 FIFO 容量当作掩码
+/// 而非“元素个数 - 1”。当容量为 2 的幂时该回绕会越界：例如容量 8、GetIndex 7 时
+/// 得到 8，指向 element 范围之外，导致读取错误的 Message RAM 地址（甚至可能读到相邻
+/// 区域）。本驱动不通过配置拒绝 overwrite、不做范围规避，overwrite 模式下的丢帧/
+/// 越界读取属于 HAL 的既有行为。
+///
+/// @warning HAL_IsRxBufferMessageAvailable() 内部会清除该 buffer 的 NDAT 位（HAL 既有
+/// 副作用）。本驱动遵循 HAL，不对此做任何补偿，也不手工读写 NDAT。
+///
+/// @warning HAL_GetRxMessage() 复制负载时不校验 Rx element 容量（按
+/// DLCtoBytes[DataLength] 直接复制）。若收到的帧超出所配置 element 容量，HAL 内部可能
+/// 已越界访问 Message RAM，取帧后的长度校验无法修正它，只能把该帧判为
+/// InvalidFrame（frame.data 为空）。
+///
+/// 负载直接复制进调用方提供的 @p buffer，帧只借用其中有效长度：HAL 消费 element 后
+/// 硬件即可复用该 element，不影响本次输出；取帧同时完成出队/清标志，因此同一 element
+/// 不会被重复取出。buffer 必须比返回的 frame 视图更长寿。
+///
+/// @p buffer 须提供至少 MaxDataLength 字节且非空，否则在任何 HAL 写入或消费之前
+/// 即返回 InvalidArgument。仅 Ok 时 frame 有效：frame.header 由后端直接填充，
+/// frame.data 借用 buffer 中有效负载（远程帧有效长度为 0）。InvalidFrame 表示帧已
+/// 消费并确认但不可交付，此时 frame.data 为空，调用方应继续排空该位置。
+///
+/// @retval Status::Ok             成功交付一帧有效数据
+/// @retval Status::Empty          该位置已无待取数据
+/// @retval Status::InvalidArgument buffer 为空或不足以容纳 MaxDataLength 字节
+/// @retval Status::InvalidFrame   已消费并确认（acknowledge），但内容不可交付
+///                                （如 FD 远程帧、超出 element 容量的截断帧），
+///                                调用方应继续排空该位置
+Status Can::read(std::uint32_t location, std::span<std::uint8_t> buffer, FrameView& frame) noexcept
 {
+    // 在任何 HAL 写入或消费（出队/清标志）之前校验输出容量，避免越界写或
+    // 消费后才发现无法交付。
+    if (buffer.data() == nullptr || buffer.size() < MaxDataLength)
+        return Status::InvalidArgument;
+
     if (handle_.State != HAL_FDCAN_STATE_BUSY)
         return Status::HardwareError;
 
-    enum class Acknowledge : std::uint8_t
+    // 一次性空判断，并按 Init 的 Rx element wordsize 计算容量，供取帧后检查长度。
+    std::size_t capacity = 0U;
+    if (location == FDCAN_RX_FIFO0 || location == FDCAN_RX_FIFO1)
     {
-        None,
-        Fifo0,
-        Fifo1,
-        Buffer,
-    };
-
-    FDCAN_GlobalTypeDef* instance          = handle_.Instance;
-    const volatile std::uint32_t* element  = nullptr;
-    std::size_t          element_payload   = 0U;
-    std::uint32_t        acknowledge_index = 0U;
-    Acknowledge          acknowledge       = Acknowledge::None;
-
-    if (location == FDCAN_RX_FIFO0)
-    {
-        const std::uint32_t allocated = handle_.Init.RxFifo0ElmtsNbr < rx_element_hardware_limit
-                                                ? handle_.Init.RxFifo0ElmtsNbr
-                                                : rx_element_hardware_limit;
+        const bool          fifo0      = location == FDCAN_RX_FIFO0;
+        const std::uint32_t configured = fifo0 ? handle_.Init.RxFifo0ElmtsNbr
+                                               : handle_.Init.RxFifo1ElmtsNbr;
+        const std::uint32_t allocated  = std::min(configured, rx_element_hardware_limit);
         if (allocated == 0U)
             return Status::Empty;
-
-        const std::uint32_t status = instance->RXF0S;
-        if ((status & FDCAN_RXF0S_F0FL) == 0U)
+        if (HAL_FDCAN_GetRxFifoFillLevel(&handle_, location) == 0U)
             return Status::Empty;
 
-        std::uint32_t get_index = (status & FDCAN_RXF0S_F0GI) >> FDCAN_RXF0S_F0GI_Pos;
-        // overwrite 模式下 FIFO 已满时，get index 指向的 element 已被丢弃。
-        // 需将其前移一位并按已分配数量回绕；若像 HAL 那样与数量做按位与，在
-        // 非 2 的幂数量下是错误的，会使索引越界。
-        if (((status & FDCAN_RXF0S_F0F) >> FDCAN_RXF0S_F0F_Pos) == 1U &&
-            ((instance->RXF0C & FDCAN_RXF0C_F0OM) >> FDCAN_RXF0C_F0OM_Pos) ==
-                    FDCAN_RX_FIFO_OVERWRITE)
-        {
-            ++get_index;
-            if (get_index >= allocated)
-                get_index = 0U;
-        }
-
-        // 状态寄存器给出的索引绝不能超出实际已分配的范围。
-        if (get_index >= allocated)
-            return Status::HardwareError;
-
-        element = reinterpret_cast<const volatile std::uint32_t*>(static_cast<std::uintptr_t>(
-                handle_.msgRam.RxFIFO0SA + get_index * handle_.Init.RxFifo0ElmtSize * 4U));
-        element_payload   = element_payload_capacity(handle_.Init.RxFifo0ElmtSize);
-        acknowledge_index = get_index;
-        acknowledge       = Acknowledge::Fifo0;
-    }
-    else if (location == FDCAN_RX_FIFO1)
-    {
-        const std::uint32_t allocated = handle_.Init.RxFifo1ElmtsNbr < rx_element_hardware_limit
-                                                ? handle_.Init.RxFifo1ElmtsNbr
-                                                : rx_element_hardware_limit;
-        if (allocated == 0U)
-            return Status::Empty;
-
-        const std::uint32_t status = instance->RXF1S;
-        if ((status & FDCAN_RXF1S_F1FL) == 0U)
-            return Status::Empty;
-
-        std::uint32_t get_index = (status & FDCAN_RXF1S_F1GI) >> FDCAN_RXF1S_F1GI_Pos;
-        if (((status & FDCAN_RXF1S_F1F) >> FDCAN_RXF1S_F1F_Pos) == 1U &&
-            ((instance->RXF1C & FDCAN_RXF1C_F1OM) >> FDCAN_RXF1C_F1OM_Pos) ==
-                    FDCAN_RX_FIFO_OVERWRITE)
-        {
-            ++get_index;
-            if (get_index >= allocated)
-                get_index = 0U;
-        }
-
-        if (get_index >= allocated)
-            return Status::HardwareError;
-
-        element = reinterpret_cast<const volatile std::uint32_t*>(static_cast<std::uintptr_t>(
-                handle_.msgRam.RxFIFO1SA + get_index * handle_.Init.RxFifo1ElmtSize * 4U));
-        element_payload   = element_payload_capacity(handle_.Init.RxFifo1ElmtSize);
-        acknowledge_index = get_index;
-        acknowledge       = Acknowledge::Fifo1;
+        capacity = element_payload_capacity(fifo0 ? handle_.Init.RxFifo0ElmtSize
+                                                  : handle_.Init.RxFifo1ElmtSize);
     }
     else
     {
-        const std::uint32_t buffer_max = handle_.Init.RxBuffersNbr < rx_element_hardware_limit
-                                                 ? handle_.Init.RxBuffersNbr
-                                                 : rx_element_hardware_limit;
-        // 专用 Rx buffer；其 new-data 标志会一直保持，直到 read() 将其清除，
-        // 因此已读空的位置返回 Empty 以终止调用方的循环。
-        if (location >= buffer_max)
+        // 越界位置与已读空位置一样视为无数据；HAL 按 Init.RxBufferSize 计算 buffer
+        // 地址，故容量同样取自 RxBufferSize。
+        const std::uint32_t allocated = std::min(handle_.Init.RxBuffersNbr,
+                                                 rx_element_hardware_limit);
+        if (location >= allocated)
+            return Status::Empty;
+        // 会清除该 buffer 的 NDAT 位（HAL 既有副作用）；只查询这一次，随后 HAL 取帧。
+        if (HAL_FDCAN_IsRxBufferMessageAvailable(&handle_, location) == 0U)
             return Status::Empty;
 
-        const std::uint32_t pending =
-                location < FDCAN_RX_BUFFER32
-                        ? ((instance->NDAT1 >> location) & 1U)
-                        : ((instance->NDAT2 >> (location & 0x1FU)) & 1U);
-        if (pending == 0U)
-            return Status::Empty;
-
-        element = reinterpret_cast<const volatile std::uint32_t*>(static_cast<std::uintptr_t>(
-                handle_.msgRam.RxBufferSA + location * handle_.Init.RxBufferSize * 4U));
-        element_payload   = element_payload_capacity(handle_.Init.RxBufferSize);
-        acknowledge_index = location;
-        acknowledge       = Acknowledge::Buffer;
+        capacity = element_payload_capacity(handle_.Init.RxBufferSize);
     }
 
-    const std::uint32_t word1 = element[0];
-    const std::uint32_t word2 = element[1];
+    // 唯一取帧路径：无条件交给 HAL 写 buffer 并出队/清标志（ack）；本驱动不自行确认。
+    FDCAN_RxHeaderTypeDef native; // 仅在 HAL_OK 后读取，所需字段均由 HAL 填充。
+    if (HAL_FDCAN_GetRxMessage(&handle_, location, &native, buffer.data()) != HAL_OK)
+        return Status::HardwareError; // 保留 HAL 返回的失败，不自行消费或补偿。
 
-    const bool          extended = (word1 & element_mask_xtd) != 0U;
-    const bool          remote   = (word1 & element_mask_rtr) != 0U;
-    const bool          fd       = (word2 & element_mask_fdf) != 0U;
-    const std::uint32_t dlc      = (word2 & element_mask_dlc) >> 16U;
-
-    FrameHeader& header = frame.header;
-    header.id                   = extended ? (word1 & element_mask_extid)
-                                           : ((word1 & element_mask_stdid) >> 18U);
-    header.id_type              = extended ? IdType::Extended : IdType::Standard;
-    header.format               = fd ? FrameFormat::Fd : FrameFormat::Classic;
-    header.type                 = remote ? FrameType::Remote : FrameType::Data;
-    // BRS 与 ESI 仅存在于 FD 格式；classic element 从不定其义。
-    header.bit_rate_switch      = fd && ((word2 & element_mask_brs) != 0U);
-    header.error_state_indicator = fd && ((word1 & element_mask_esi) != 0U);
-    header.remote_length        = 0U;
-
-    std::size_t length = bytes_from_dlc(dlc);
-    // classic 帧最多携带 8 字节，无论原始 DLC 编码为何；不要在此把编码 9..15
-    // 换算成 12..64 字节。
+    const bool  fd     = native.FDFormat == FDCAN_FD_CAN;
+    const bool  remote = native.RxFrameType == FDCAN_REMOTE_FRAME;
+    std::size_t length = bytes_from_dlc(native.DataLength);
+    // Classic 的 DLC 9..15 仍只表示 8 字节，不能按 FD 的非线性长度交付。
     if (!fd && length > 8U)
         length = 8U;
 
-    bool deliverable = true;
-    if (remote && fd)
+    auto& header   = frame.header;
+    header.id      = native.Identifier;
+    header.id_type = native.IdType == FDCAN_EXTENDED_ID ? IdType::Extended : IdType::Standard;
+    header.format  = fd ? FrameFormat::Fd : FrameFormat::Classic;
+    header.type    = remote ? FrameType::Remote : FrameType::Data;
+    header.bit_rate_switch       = fd && native.BitRateSwitch == FDCAN_BRS_ON;
+    header.error_state_indicator = fd && native.ErrorStateIndicator == FDCAN_ESI_PASSIVE;
+    header.remote_length         = 0U;
+
+    if (fd && remote)
     {
-        // CAN FD 没有远程帧，故此类 element 非法：在下方消费并确认它，
-        // 但绝不交付。
-        deliverable  = false;
-        frame.length = 0U;
+        // CAN FD 不支持远程帧；HAL 已完成消费，此处只拒绝交付。
+        frame.data = {};
+        return Status::InvalidFrame;
     }
-    else if (remote)
+    if (remote)
     {
-        // 远程帧不存储负载：长度字段是协议请求而非数据，故绝不截断。
+        // 远程帧的 DLC 表示请求长度，不是本帧携带的负载长度。
         header.remote_length = static_cast<std::uint8_t>(length);
-        frame.length         = 0U;
+        frame.data           = buffer.first(0);
+        return Status::Ok;
     }
-    else if (length > element_payload || length > max_data_length)
+    if (length > capacity)
     {
-        // 所配置的 element 小于收到的负载，说明硬件已存储了一个被截断的帧。
-        // 在下方消费并确认它，但将其报告为不可交付，而不是返回一个短帧；
-        // 且绝不读到该 element 的 Message RAM 之外。
-        deliverable  = false;
-        frame.length = 0U;
+        // 这是取帧后的交付检查，不修正 HAL 内部可能已经发生的越界访问。
+        frame.data = {};
+        return Status::InvalidFrame;
     }
-    else
-    {
-        // 逐 word 读取 element，而非对负载 memcpy()：该 element 位于硬件随时
-        // 更新的内存中，编译器不得缓存它，且只提取最后一个 word 中的有效字节。
-        // ceil(length/4) 个 word 不会越出 element，因为上面确认的已配置负载容量
-        // 始终是 4 字节的整数倍。
-        const std::size_t words = (length + 3U) / 4U;
-        for (std::size_t word_index = 0U; word_index < words; ++word_index)
-        {
-            const std::uint32_t word = element[2U + word_index];
-            const std::size_t   base = word_index * 4U;
-            for (std::size_t byte = 0U; byte < 4U && base + byte < length; ++byte)
-                frame.data[base + byte] = static_cast<std::uint8_t>((word >> (8U * byte)) & 0xFFU);
-        }
-        frame.length = static_cast<std::uint8_t>(length);
-    }
-
-    // 数据已从 element 复制到调用方输出后，才执行确认（出队/清标志）：此时
-    // element 即便随即被硬件复用，也不会影响本次已取到的数据。
-    switch (acknowledge)
-    {
-    case Acknowledge::Fifo0:
-        instance->RXF0A = acknowledge_index;
-        break;
-    case Acknowledge::Fifo1:
-        instance->RXF1A = acknowledge_index;
-        break;
-    case Acknowledge::Buffer:
-        if (acknowledge_index < FDCAN_RX_BUFFER32)
-            instance->NDAT1 = std::uint32_t{1} << acknowledge_index;
-        else
-            instance->NDAT2 = std::uint32_t{1} << (acknowledge_index & 0x1FU);
-        break;
-    case Acknowledge::None:
-        break;
-    }
-
-    // InvalidFrame 表示“已在上方消费并确认，但不可交付”；公共层会继续排空该位置
-    // 而不是派发这一帧。
-    return deliverable ? Status::Ok : Status::InvalidFrame;
+    frame.data = buffer.first(length);
+    return Status::Ok;
 }
 
 /// 应用一条过滤器配置：要求外设已初始化且处于 READY（HAL 拒绝在运行中修改全局
@@ -771,21 +707,14 @@ void Can::rx_buffers_irq(NativeHandle* handle)
     if (instance == nullptr)
         return;
 
-    // HAL 只清除了共享中断标志，因此各 buffer 的 new-data 标志在此仍然有效；
-    // read() 会逐个 buffer 地清除它们。
-    const std::uint32_t limit =
-            instance->handle_.Init.RxBuffersNbr < 64U ? instance->handle_.Init.RxBuffersNbr : 64U;
-    const std::uint32_t pending_low  = instance->handle_.Instance->NDAT1;
-    const std::uint32_t pending_high = instance->handle_.Instance->NDAT2;
-
+    // 此处只遍历配置的下标，存在性判断统一留给 read()。
+    // HAL_FDCAN_IsRxBufferMessageAvailable 会清 NDAT；若此处先查询，read() 再次
+    // 查询将得到“无数据”，导致漏掉该消息。不能在两个位置重复查询。
+    const std::uint32_t limit = instance->handle_.Init.RxBuffersNbr < rx_element_hardware_limit
+                                        ? instance->handle_.Init.RxBuffersNbr
+                                        : rx_element_hardware_limit;
     for (std::uint32_t index = 0U; index < limit; ++index)
-    {
-        const std::uint32_t pending = index < FDCAN_RX_BUFFER32
-                                              ? ((pending_low >> index) & 1U)
-                                              : ((pending_high >> (index & 0x1FU)) & 1U);
-        if (pending != 0U)
-            instance->on_receive(index);
-    }
+        instance->on_receive(index);
 }
 
 void Can::tx_buffers_irq(NativeHandle* handle, std::uint32_t)
@@ -802,6 +731,6 @@ void Can::tx_irq(NativeHandle* handle)
         instance->on_tx_available();
 }
 
-} // 命名空间 bsp::can
+} // namespace bsp::can
 
 #endif // CAN_DRIVER_FDCAN：FDCAN 后端。

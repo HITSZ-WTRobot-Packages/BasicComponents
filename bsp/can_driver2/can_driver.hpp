@@ -212,11 +212,11 @@ private:
         void (*invoke)(const Callback&, const FrameView&) noexcept {}; ///< 由对应注册重载填充。
     };
 
+#if CAN_DRIVER_TX_QUEUE_SIZE > 0
     /**
-     * 软件队列中的一帧（仅 CAN_DRIVER_TX_QUEUE_SIZE > 0 时使用）。data 按
-     * MaxDataLength 固定分配并 4 字节对齐，length 为有效字节数。assign() 会把
-     * HAL 会读取的向上取整字尾部清零，使其可直接交给后端复制；view() 借用自身
-     * 存储，须在本条目存活期内使用。
+     * TX 软件队列持有的一帧；不用于 RX。data 按 MaxDataLength 固定分配并
+     * 4 字节对齐，length 为有效字节数。assign() 初始化 HAL 会读取的尾部；
+     * view() 借用本条目的数据，须在该条目存活期内使用。
      */
     struct StoredFrame
     {
@@ -230,6 +230,7 @@ private:
             return { header, std::span<const std::uint8_t>{ data.data(), length } };
         }
     };
+#endif
 
     NativeHandle&                          handle_;           ///< 借用的 HAL 句柄，须比本对象长寿。
     std::array<Callback, CallbackCapacity> callbacks_{};      ///< 定长回调表，start() 后不再改变。
@@ -277,10 +278,13 @@ private:
     [[nodiscard]] Status write(const FrameView& frame, bool padded_storage) noexcept;
     /**
      * 后端读帧。location 为 Rx FIFO 索引或 Rx Buffer 下标（含义随后端而定）。
-     * Empty 表示该位置已无数据；InvalidFrame 表示帧已被消费并确认但不可交付，
-     * 调用方应继续排空同一位置；其余非 Ok 视为硬件错误并终止。
+     * buffer 须提供至少 MaxDataLength 字节的可写空间；后端直接填写 frame.header，
+     * 并使 frame.data 借用 buffer 中的有效负载。仅返回 Ok 时 frame 有效，远程帧
+     * 的数据视图为空；调用方不得在 buffer 被复用或销毁后继续持有视图。
+     * Empty 表示无数据；InvalidFrame 表示帧已消费并确认但不可交付，须继续排空。
      */
-    [[nodiscard]] Status read(std::uint32_t location, StoredFrame& frame) noexcept;
+    [[nodiscard]] Status read(std::uint32_t location, std::span<std::uint8_t> buffer,
+                              FrameView& frame) noexcept;
     [[nodiscard]] Status configure_filter_hardware(
             const FilterConfig& config) noexcept; ///< 后端：应用过滤器配置。
 
