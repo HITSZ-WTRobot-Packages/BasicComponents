@@ -373,6 +373,7 @@ void Can::rollback_start() noexcept
     hardware_started_ = false;
 }
 
+#if CAN_DRIVER_VALIDATE_TX_FRAME
 /// 校验一帧是否可由当前配置的外设发送：检查 FD/Classic 格式与 BRS 的兼容性、
 /// 远程帧约束、负载长度、Tx FIFO/queue 是否存在，以及 Tx element 能否容纳该负载。
 /// 只做能力校验，不修改任何状态；不满足时返回 Unsupported/InvalidConfiguration，
@@ -422,15 +423,18 @@ Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
 
     return Status::Ok;
 }
+#endif
 
-/// 将一帧投入 Tx FIFO/queue。要求外设处于 BUSY；BusOff 只上报不恢复。不重复硬件
-/// 能力校验（调用方已做）。@p padded_storage 为 true 时表示负载已由公共层补齐到
-/// 4 字节边界，可直接交给 HAL；否则短帧负载会被暂存到安全缓冲，避免 HAL 按 word
-/// 读取时越出调用方 span。
+/// 将一帧投入 Tx FIFO/queue。要求外设处于 BUSY；BusOff 只上报不恢复。
+/// CAN_DRIVER_VALIDATE_TX_FRAME 非零时调用方已完成硬件能力校验，关闭时由调用方
+/// 保证帧合法且适配 element 容量。@p padded_storage 为 true 时表示负载已由公共层
+/// 补齐到 4 字节边界，可直接交给 HAL；否则短帧负载会被暂存到安全缓冲，避免 HAL
+/// 按 word 读取时越出调用方 span。
 Status Can::write(const FrameView& frame, bool padded_storage) noexcept
 {
-    // 公共层在提交前会调用 validate_hardware_frame()，而软件队列中的条目在入队
-    // 时也已校验，因此此处不再重复硬件能力检查。
+    // CAN_DRIVER_VALIDATE_TX_FRAME 非零时，公共层在提交前会调用
+    // validate_hardware_frame()，软件队列条目在入队时也已校验；关闭时由调用方保证
+    // 帧合法。无论开关取值，此处都不再重复硬件能力检查。
 
     // write() 只上报 send() 能理解的若干状态；外设未运行时在此视为硬件侧故障。
     if (handle_.State != HAL_FDCAN_STATE_BUSY)
@@ -450,8 +454,10 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
     const std::size_t payload_bytes = remote ? frame.header.remote_length : frame.data.size();
 
     const std::uint32_t dlc = dlc_from_length(payload_bytes);
+#if CAN_DRIVER_VALIDATE_TX_FRAME
     if (dlc == invalid_dlc)
         return Status::InvalidConfiguration;
+#endif
 
     FDCAN_TxHeaderTypeDef tx{};
     tx.Identifier = frame.header.id;
@@ -487,8 +493,10 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
     {
         // 短帧或远程帧：只暂存 HAL 实际会读取的字节，从而绝不触碰调用方存储
         // 范围之外的任何数据。
+#if CAN_DRIVER_VALIDATE_TX_FRAME
         if (read_words * 4U > sizeof(staging))
             return Status::InvalidConfiguration; // 对合法 DLC 不可达
+#endif
         if (copy_bytes != 0U)
             std::memcpy(staging, frame.data.data(), copy_bytes);
         for (std::size_t index = copy_bytes; index < read_words * 4U; ++index)

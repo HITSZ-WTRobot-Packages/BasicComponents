@@ -430,6 +430,7 @@ void Can::rollback_start() noexcept
     (void)HAL_CAN_Stop(&handle_);
 }
 
+#if CAN_DRIVER_VALIDATE_TX_FRAME
 Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
 {
     // send() 在公共帧校验之后调用此能力闸门；仅 FDCAN 才有的特性在这里明确拒绝，
@@ -456,12 +457,14 @@ Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
 
     return Status::Ok;
 }
+#endif
 
 Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
 {
-    // 公共层只把手校验过的帧交给后端（send() 会执行 validate_frame +
-    // validate_hardware_frame；flush_tx 重放的是入队时即已校验的帧），因此这里只需
-    // 检查当前时刻的硬件状态与能力。
+    // CAN_DRIVER_VALIDATE_TX_FRAME 非零时，公共层只把校验过的帧交给后端（send() 会
+    // 执行 validate_frame + validate_hardware_frame，flush_tx 重放的是入队时即已
+    // 校验的帧）；关闭时由调用方保证帧合法。无论开关取值，这里都只检查当前时刻的
+    // 硬件状态与能力，不重复帧能力校验。
 
     // READY 的外设仍处于初始化模式：此时 HAL 会接受该帧并报告成功，但总线上不会
     // 发出任何东西，因此只有 LISTENING 状态可写。
@@ -510,8 +513,8 @@ Status Can::write(const FrameView& frame, const bool padded_storage) noexcept
     }
     else
     {
-        // 拷贝量由已校验的载荷长度决定并受 8 字节上限约束；更长的 span 只可能来自
-        // 绕过公共校验的调用方，此时多余部分不会被读入暂存缓冲。
+        // 拷贝量由载荷长度决定并受 8 字节上限约束；关闭帧校验时更长的 span 只可能
+        // 来自调用方，此时多余部分不会被读入暂存缓冲。
         const std::size_t payload = frame.data.size() < MaxDataLength ? frame.data.size()
                                                                        : MaxDataLength;
         for (std::size_t i = 0; i < payload; ++i)

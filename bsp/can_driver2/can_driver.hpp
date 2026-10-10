@@ -24,6 +24,11 @@
  * CAN_DRIVER_MAX_CALLBACKS 与 CAN_DRIVER_MAX_INSTANCES 是固定资源上限。所有使用
  * 本套件的翻译单元必须给出这些宏的一致定义。TX 容量在 FDCAN 上默认 0，在
  * bxCAN 上默认 8。
+ *
+ * CAN_DRIVER_VALIDATE_TX_FRAME 默认 0，表示发送路径不执行帧结构或后端帧能力
+ * 校验；非零时启用。所有使用本套件的翻译单元必须给出该宏的一致定义。关闭时
+ * 调用方必须自行保证提交的帧合法且适配已配置的后端，尤其不得超出 TX element
+ * 容量；此时 send() 不保证给出 InvalidFrame/Unsupported 诊断。
  */
 #pragma once
 
@@ -81,6 +86,14 @@
 #    else
 #        define CAN_DRIVER_MAX_INSTANCES 1
 #    endif
+#endif
+
+// 是否在发送路径执行运行时帧校验：0（默认）不执行帧结构或后端帧能力校验，也
+// 不产生 InvalidFrame/Unsupported 诊断；非零启用。所有使用本套件的翻译单元必须
+// 通过统一的编译定义给出相同取值。关闭时调用方必须自行保证帧合法且适配已配置
+// 的后端（尤其 TX element 容量）。
+#ifndef CAN_DRIVER_VALIDATE_TX_FRAME
+#    define CAN_DRIVER_VALIDATE_TX_FRAME 0
 #endif
 
 #if CAN_DRIVER_TX_QUEUE_SIZE < 0 || CAN_DRIVER_MAX_CALLBACKS < 1 || CAN_DRIVER_MAX_INSTANCES < 1
@@ -146,6 +159,10 @@ public:
      * 校验并提交一帧，或在硬件无空位时把它复制进软件队列。负载为借用，函数
      * 返回后调用方即可复用其缓冲区。软件队列满时丢弃最旧一项并返回
      * ReplacedOldest。
+     *
+     * 仅当 CAN_DRIVER_VALIDATE_TX_FRAME 非零时才执行帧结构与后端帧能力校验
+     * （默认 0 不执行）。关闭时调用方必须自行保证帧合法且适配已配置的后端，
+     * 尤其不得超出 TX element 容量；此时不会给出 InvalidFrame/Unsupported 诊断。
      *
      * Submitted/Queued/ReplacedOldest 仅表示帧已被受理，不保证真正发送成功，也
      * 不含 CAN 仲裁顺序信息。FD 数据长度必须精确可表示（见 is_fd_length），
@@ -268,8 +285,10 @@ private:
             const Callback& callback) noexcept; ///< 启动前入表；已启动返回
                                                 ///< InvalidState，满返回
                                                 ///< NoCapacity。
+#if CAN_DRIVER_VALIDATE_TX_FRAME
     [[nodiscard]] static Status validate_frame(
             const FrameView& frame) noexcept; ///< 后端无关的帧结构与长度校验。
+#endif
     [[nodiscard]] static SendResult send_result(Status status) noexcept; ///< Status 到 SendResult
                                                                          ///< 的映射。
     [[nodiscard]] Status flush_tx() noexcept; ///< Caller holds ISRGuard. 尽可能清空并重放软件队列。
@@ -281,8 +300,10 @@ private:
     [[nodiscard]] Status start_hardware() noexcept;       ///< 后端：启动硬件并安装回调。
     [[nodiscard]] Status enable_notifications() noexcept; ///< 后端：使能 IRQ 通知（不得等待）。
     void                 rollback_start() noexcept; ///< 后端：使能通知失败时回滚已启动的硬件。
+#if CAN_DRIVER_VALIDATE_TX_FRAME
     [[nodiscard]] Status validate_hardware_frame(
             const FrameView& frame) const noexcept; ///< 后端能力校验（FD 支持、element 容量）。
+#endif
     /**
      * 后端写帧。padded_storage 为真表示 frame 来自软件队列，其向上取整字尾部
      * 已由 StoredFrame::assign() 初始化，后端可跳过临时缓冲直接引用；来自

@@ -6,6 +6,7 @@
 
 - bsp: 对 HAL 库的基本封装
     - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fcan_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) can_driver ：STM32 bxCAN 驱动
+    - can_driver2 ：固定存储的 CAN/FDCAN 驱动，发送帧检查默认关闭（见下文）
     - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fgpio_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) gpio_driver ：STM32 GPIO 封装（GPIO + PWM）
     - ethernet: 以太网与 PHY 组件
         - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Fcore&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [core](bsp/ethernet/core/README.md) ：`IPhy` 同步 PHY 契约与链路事件接口
@@ -36,3 +37,11 @@
     - isr_lock.h: 中断保护锁
 
 具体使用方法请查看代码注释
+
+## can_driver2 发送帧检查
+
+`CAN_DRIVER_VALIDATE_TX_FRAME` 默认值为 `0`，发送时不执行帧结构及后端帧能力校验；非零时启用原有校验。
+通过 CANDriver2 驱动目标的编译定义（如 `-DCAN_DRIVER_VALIDATE_TX_FRAME=1`）统一覆盖，所有使用该驱动的翻译单元须保持宏定义一致。
+关闭检查时，调用方必须保证 ID、字段组合、负载指针及长度合法，并确保帧格式和负载适配已配置的外设，尤其是 FDCAN TX element 容量；非法输入可能导致越界访问，不保证返回 `InvalidFrame` 或 `Unsupported`。
+该开关不影响启动状态、Bus-Off、发送空位及 HAL 错误处理，也不影响接收和过滤器检查。
+

@@ -176,6 +176,7 @@ Status Can::add_callback(const Callback& callback) noexcept
     return Status::Ok;
 }
 
+#if CAN_DRIVER_VALIDATE_TX_FRAME
 /// 纯软件侧的帧合法性检查（不触硬件）：
 /// - ID 按 id_type（Standard/Extended）判断范围与扩展位；
 /// - 格式仅 Classic/Fd，类型仅 Data/Remote，非空 data 必须带有效指针；
@@ -214,6 +215,7 @@ Status Can::validate_frame(const FrameView& frame) noexcept
     }
     return Status::Ok;
 }
+#endif
 
 /// 把底层 Status 归类为面向调用者的 SendResult：Ok→Submitted、Busy→Busy、
 /// Unsupported→Unsupported、各类参数/范围错误→InvalidFrame、BusOff→BusOff、
@@ -279,22 +281,31 @@ Status Can::flush_tx() noexcept
     return Status::Ok;
 }
 
-/// 提交一帧的完整流程：先做软件校验并映射结果；在临界区内确认已启动；再做
-/// 硬件相关校验；随后排空历史队列，队列为空时尝试直接写硬件，若硬件忙则改为
-/// 入队。入队时若队列已满，覆盖最旧一项并返回 ReplacedOldest，否则返回 Queued。
+/// 提交一帧的完整流程：CAN_DRIVER_VALIDATE_TX_FRAME 非零时先做软件校验并映射结果，
+/// 在临界区内确认已启动后再做硬件相关校验；关闭时跳过这两道校验，直接依赖调用方
+/// 保证帧合法。随后排空历史队列，队列为空时尝试直接写硬件，若硬件忙则改为入队。
+/// 入队时若队列已满，覆盖最旧一项并返回 ReplacedOldest，否则返回 Queued。
 /// Submitted/Queued/ReplacedOldest 均不保证最终发送成功。
 SendResult Can::send(const FrameView& frame) noexcept
 {
-    auto result = validate_frame(frame);
+#if CAN_DRIVER_VALIDATE_TX_FRAME
+    Status result = validate_frame(frame);
     if (result != Status::Ok)
         return send_result(result);
+#endif
 
     ISRGuard guard;
     if (!started_)
         return SendResult::NotStarted;
+
+#if CAN_DRIVER_VALIDATE_TX_FRAME
     result = validate_hardware_frame(frame);
     if (result != Status::Ok)
         return send_result(result);
+#elif CAN_DRIVER_TX_QUEUE_SIZE > 0
+    // 校验关闭时 result 仅承载下方 flush_tx() 的返回值。
+    Status result;
+#endif
 
 #if CAN_DRIVER_TX_QUEUE_SIZE > 0
     result = flush_tx();
