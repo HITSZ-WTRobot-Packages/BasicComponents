@@ -438,7 +438,7 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
 
     // BusOff 只上报、绝不自动恢复：是否重启总线由应用决定。经 HAL 读取协议状态，
     // 避免手写 PSR。
-    FDCAN_ProtocolStatusTypeDef protocol_status{};
+    FDCAN_ProtocolStatusTypeDef protocol_status;
     (void)HAL_FDCAN_GetProtocolStatus(&handle_, &protocol_status);
     if (protocol_status.BusOff != 0U)
         return Status::BusOff;
