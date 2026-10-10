@@ -15,9 +15,10 @@
  * 顺序，不保留 CAN 仲裁顺序。接收帧若大于其配置的硬件 element 会被丢弃，
  * 绝不作为看似合法但被截断的负载交付。
  *
- * 过滤变更只影响指定的 entry/策略。FDCAN 复位默认可能接受未匹配帧：需要拒收时
- * 显式应用 GlobalFilter{}。所有 bxCAN 共享 bank 及其分界必须在任一条总线启动前
- * 配置。
+ * 过滤器配置写入指定 entry/策略，并应用后端全局设置。FDCAN 默认可能接受未匹配帧，需要拒收时
+ * 显式应用 GlobalFilter{}。所有 bxCAN 共享 bank 必须在两路 HAL 初始化完成后、
+ * 任一条总线启动前配置；共享分界由 CAN_DRIVER_BXCAN_CAN2_START_BANK 统一指定，
+ * 随每次过滤器配置写入 HAL，不再提供运行时分界配置。
  *
  * CAN_DRIVER_TX_QUEUE_SIZE 选择可用的软件 TX 容量（允许为 0）。
  * CAN_DRIVER_MAX_CALLBACKS 与 CAN_DRIVER_MAX_INSTANCES 是固定资源上限。所有使用
@@ -48,6 +49,18 @@
 #    endif
 #else
 #    error "CANDriver requires HAL_CAN_MODULE_ENABLED or HAL_FDCAN_MODULE_ENABLED"
+#endif
+
+#if !CAN_DRIVER_FDCAN
+// CAN1/CAN2 共享过滤器组中首个归属 CAN2 的 bank，默认各分配 14 个 bank。
+// 合法范围为 0..27；0 表示全部归 CAN2。CAN3 与单 CAN 的独立过滤器组不受影响。
+// 通过驱动目标的编译定义统一覆盖，不能只在业务源文件中定义此宏。
+#    ifndef CAN_DRIVER_BXCAN_CAN2_START_BANK
+#        define CAN_DRIVER_BXCAN_CAN2_START_BANK 14U
+#    endif
+#    if CAN_DRIVER_BXCAN_CAN2_START_BANK < 0 || CAN_DRIVER_BXCAN_CAN2_START_BANK > 27
+#        error "CAN_DRIVER_BXCAN_CAN2_START_BANK must be in [0, 27]"
+#    endif
 #endif
 
 #ifndef CAN_DRIVER_TX_QUEUE_SIZE

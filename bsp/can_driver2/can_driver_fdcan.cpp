@@ -675,8 +675,7 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
                 }
                 else
                 {
-                    // BankFilter 与 FilterBankSplit 描述的是 bxCAN 的 bank 布局，
-                    // FDCAN 的 filter list 无法表达。
+                    // BankFilter 描述 bxCAN 的 bank 布局，FDCAN 的 filter list 无法表达。
                     return Status::Unsupported;
                 }
             },

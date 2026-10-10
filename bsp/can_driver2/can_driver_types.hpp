@@ -187,16 +187,6 @@ struct BankFilter
     std::uint16_t mask_low{};            ///< 低位半字掩码或第二个标识符。
 };
 
-/**
- * CAN1/CAN2 共享 filter bank 的分界：first_can2_bank 为首个归属 CAN2 的 bank
- * 编号（0 表示整块域归 CAN2）。仅在双控制器共享 filter 域且两条总线都尚未
- * start() 时有效，单控制器部件返回 Unsupported，越界返回 OutOfRange。
- */
-struct FilterBankSplit
-{
-    std::uint32_t first_can2_bank{14};
-};
-
 /// FDCAN 全局过滤器对未命中帧的处理：拒收，或存入指定 FIFO（该 FIFO 未分配
 /// element 时返回 NoCapacity）。
 enum class NonMatchingAction : std::uint8_t { Reject, Fifo0, Fifo1 };
@@ -224,7 +214,6 @@ struct ExtendedIdMask
 };
 
 /// 过滤器配置统一入口；后端不支持的备选项返回 Unsupported。
-using FilterConfig = std::variant<IdFilter, BankFilter, FilterBankSplit,
-                                  GlobalFilter, ExtendedIdMask>;
+using FilterConfig = std::variant<IdFilter, BankFilter, GlobalFilter, ExtendedIdMask>;
 
 } // 命名空间 bsp::can

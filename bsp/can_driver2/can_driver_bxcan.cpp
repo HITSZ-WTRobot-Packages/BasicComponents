@@ -34,30 +34,23 @@
  *   在 bxCAN 上没有对应物，返回 Status::Unsupported。
  *
  * 滤波器编程完全由 HAL 主导：本后端不直接写任何滤波器寄存器（FMR/FM1R/FS1R/
- * FFA1R/FA1R/FR1/FR2），一律经 HAL_CAN_ConfigFilter() 完成；由于该函数每次都会
- * 用 CAN_FilterTypeDef::SlaveStartFilterBank 重写 FMR.CAN2SB，普通 bank 配置都
- * 会携带当前 FMR 中的边界值，因此不会把 FilterBankSplit() 设定的分界悄悄复位。
- * 在 CAN1/CAN2 共用 28 个 bank 的型号上，滤波器寄存器始终通过 CAN1（主控）访问，
- * 即使是 CAN2 的 handle 也一样；因此主实例也必须被初始化（有时钟）。bank 归属
- * （bank < CAN2SB 属于 CAN1，其余属于 CAN2）由调用方显式决定：索引按给定值写入。
+ * FFA1R/FA1R/FR1/FR2），一律经 HAL_CAN_ConfigFilter() 完成；该函数每次都用
+ * CAN_FilterTypeDef::SlaveStartFilterBank 重写 FMR.CAN2SB，因此本后端在每次配置
+ * 时都直接把 CAN_DRIVER_BXCAN_CAN2_START_BANK 填入该字段：CAN1/CAN2 共用域的分
+ * 界因此被编译期宏全局固定（取值范围 0..27，默认 14），不存在运行时可改的分界，
+ * 也不保留任何分界 getter、bank 0 快照或回写。在 CAN1/CAN2 共用 28 个 bank 的
+ * 型号上，滤波器寄存器始终通过 CAN1（主控）访问，即使是 CAN2 的 handle 也一样；
+ * 因此主实例也必须被初始化（有时钟）。bank 归属（bank < CAN2SB 属于 CAN1，其余
+ * 属于 CAN2）由该宏决定，而 bank 索引仍按调用方给定值写入。CAN3（存在独立 14
+ * bank 域的型号）与单控制器型号的原生 HAL 本就忽略 SlaveStartFilterBank 参数，
+ * 故本后端对其无条件填入该宏，既不改变其 bank 数量也不影响其保护。
  *
- * HAL 没有读取 FMR.CAN2SB 的 getter，因此这里保留唯一必要的硬件读回：读取
- * FMR.CAN2SB 以获得当前分界（普通 bank 配置需要它来保持分界不变），以及在
- * FilterBankSplit 改界时快照共享 master 的 bank 0（FS1R/FM1R/FFA1R/FA1R/FR1/
- * FR2）。除此之外本后端不直接读硬件状态（Bus-off 等一律走 HAL 宏/API，见
- * write()）。
- *
- * FilterBankSplit 的分界改动是一次 setup 阶段副作用：HAL 只用
- * SlaveStartFilterBank 重写 CAN2SB，因此改界时先把共享 master 的 bank 0 逐位
- * 读回、按 HAL 的编码反向构造出等价的 CAN_FilterTypeDef，再让 HAL 以新的
- * SlaveStartFilterBank 重新应用同一 bank，从而只改分界、逐位保留 bank 0 与所有
- * 其他 bank 的内容；若请求分界与当前分界相同则直接返回 Ok，不做任何重编程。这里
- * 不引入任何类内缓存：每次都以硬件当前值为准，避免与外部 HAL 配置脱同步。
- *
- * 共享域中的每个 bank 以及分界本身都必须在 CAN1/CAN2 这对总线的任一条启动之前
- * 配置完成：若另一条已注册总线正在运行，则共享域写入会被拒绝
+ * 共享域中的每个 bank 都必须在 CAN1/CAN2 这对总线的任一条启动之前配置完成：本
+ * 实例须在两路 HAL init 完成、任一条总线启动之前完成配置（公共 configure_filter()
+ * 已在配置互斥下保证该顺序）；若另一条已注册总线正在运行，则共享域写入会被拒绝
  * （Status::InvalidState），以保证本实例不会在一条活跃总线之下进入共享滤波器
- * 初始化模式。CAN3 拥有自有的 14 个 bank，不受该约束。
+ * 初始化模式。两路 HAL init 完成后再配共享 bank 时，禁止随后任何外部 HAL 以不同
+ * 的 SlaveStartFilterBank 重置分界。CAN3 拥有自有的 14 个 bank，不受该约束。
  */
 
 #include "can_driver.hpp"
@@ -146,37 +139,10 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
                                            : CAN_DRIVER_BXCAN_SINGLE_FILTER_BANKS;
 }
 
-/// 承载滤波器 bank 的寄存器块：共享域为 CAN1，否则为 handle 自身实例。
-[[nodiscard]] CAN_TypeDef* filter_master(const CAN_HandleTypeDef& handle) noexcept
-{
-#if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
-#    if defined(CAN3)
-    return (handle.Instance == CAN3) ? handle.Instance : CAN1;
-#    else
-    (void)handle;
-    return CAN1;
-#    endif
-#else
-    return handle.Instance;
-#endif
-}
-
-/// 从硬件读取 FMR.CAN2SB 中当前的分界（CAN2 可用 bank 的起始索引）。
-[[nodiscard]] std::uint32_t can2_start_bank(const CAN_HandleTypeDef& handle) noexcept
-{
-#if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
-    if (has_shared_filter_banks(handle))
-        return (filter_master(handle)->FMR & CAN_FMR_CAN2SB) >> CAN_FMR_CAN2SB_Pos;
-#else
-    (void)handle;
-#endif
-    return 0U;
-}
-
-/// 以该域当前的分界构造 bank 模板，使 HAL_CAN_ConfigFilter() 用其已经持有的值
-/// 重写 FMR.CAN2SB（即不改动分界）。其余字段给出确定的初值，避免使用未初始化的
-/// 栈字段。
-[[nodiscard]] CAN_FilterTypeDef make_bank(const CAN_HandleTypeDef& handle) noexcept
+/// 以编译期固定分界构造 bank 模板，使 HAL_CAN_ConfigFilter() 以
+/// CAN_DRIVER_BXCAN_CAN2_START_BANK 重写 FMR.CAN2SB（全局固定分界）。其余字段给
+/// 出确定的初值，避免使用未初始化的栈字段。
+[[nodiscard]] CAN_FilterTypeDef make_bank() noexcept
 {
     CAN_FilterTypeDef filter{};
     filter.FilterIdHigh         = 0U;
@@ -188,7 +154,7 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     filter.FilterMode           = CAN_FILTERMODE_IDMASK;
     filter.FilterScale          = CAN_FILTERSCALE_32BIT;
     filter.FilterActivation     = CAN_FILTER_DISABLE;
-    filter.SlaveStartFilterBank = can2_start_bank(handle);
+    filter.SlaveStartFilterBank = CAN_DRIVER_BXCAN_CAN2_START_BANK;
     return filter;
 }
 
@@ -222,7 +188,7 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
             return Status::InvalidArgument;
     }
 
-    CAN_FilterTypeDef filter = make_bank(handle);
+    CAN_FilterTypeDef filter = make_bank();
     filter.FilterBank        = request.index;
 
     switch (request.action)
@@ -371,7 +337,7 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
             return Status::InvalidArgument;
     }
 
-    CAN_FilterTypeDef filter = make_bank(handle);
+    CAN_FilterTypeDef filter = make_bank();
     filter.FilterBank        = request.index;
     filter.FilterScale       = scale;
     filter.FilterMode        = mode;
@@ -383,59 +349,6 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     filter.FilterMaskIdHigh  = request.mask_high;
     return apply_bank(handle, filter);
 }
-
-#if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
-/// 以新的 CAN1/CAN2 分界重新应用共享 master 的 bank 0。
-///
-/// HAL 没有 CAN2SB 的 setter，只有 HAL_CAN_ConfigFilter() 会以
-/// SlaveStartFilterBank 重写分界。为了只改分界而不破坏任何 bank 内容，这里先把
-/// master 的 bank 0 逐位快照（scale/mode/fifo/activation 与 FR1/FR2），按 HAL 的
-/// 编码反向推导出等价的 CAN_FilterTypeDef，再交由 HAL 重新应用同一 bank：bank 0
-/// 的位布局与使能状态被逐位还原，其余 bank 完全不碰，仅 FMR.CAN2SB 被更新。这是
-/// 唯一一处为改界而读回滤波器硬件的地方，且不保留任何缓存。
-[[nodiscard]] Status reapply_shared_split(CAN_HandleTypeDef& handle,
-                                         const std::uint32_t first_can2_bank) noexcept
-{
-    CAN_TypeDef* const   master   = filter_master(handle);
-    const std::uint32_t  bank_bit = 1U << 0U; // FilterBank0：bank 0 在 *1R 中的位。
-
-    const std::uint32_t fr1 = master->sFilterRegister[0].FR1;
-    const std::uint32_t fr2 = master->sFilterRegister[0].FR2;
-
-    // 所有字段都显式赋值：HAL 会读取结构体的每一个字段。
-    CAN_FilterTypeDef filter{};
-    filter.FilterBank           = 0U;
-    filter.SlaveStartFilterBank = first_can2_bank;
-
-    if ((master->FS1R & bank_bit) != 0U)
-    {
-        // 32 位 scale：FR1 = IdHigh<<16 | IdLow，FR2 = MaskHigh<<16 | MaskLow。
-        filter.FilterScale      = CAN_FILTERSCALE_32BIT;
-        filter.FilterIdLow      = fr1 & 0xFFFFU;
-        filter.FilterIdHigh     = (fr1 >> 16U) & 0xFFFFU;
-        filter.FilterMaskIdLow  = fr2 & 0xFFFFU;
-        filter.FilterMaskIdHigh = (fr2 >> 16U) & 0xFFFFU;
-    }
-    else
-    {
-        // 16 位 scale：FR1 = MaskLow<<16 | IdLow，FR2 = MaskHigh<<16 | IdHigh。
-        filter.FilterScale      = CAN_FILTERSCALE_16BIT;
-        filter.FilterIdLow      = fr1 & 0xFFFFU;
-        filter.FilterMaskIdLow  = (fr1 >> 16U) & 0xFFFFU;
-        filter.FilterIdHigh     = fr2 & 0xFFFFU;
-        filter.FilterMaskIdHigh = (fr2 >> 16U) & 0xFFFFU;
-    }
-
-    filter.FilterMode = (master->FM1R & bank_bit) != 0U ? CAN_FILTERMODE_IDLIST
-                                                        : CAN_FILTERMODE_IDMASK;
-    filter.FilterFIFOAssignment =
-        (master->FFA1R & bank_bit) != 0U ? CAN_FILTER_FIFO1 : CAN_FILTER_FIFO0;
-    filter.FilterActivation =
-        (master->FA1R & bank_bit) != 0U ? CAN_FILTER_ENABLE : CAN_FILTER_DISABLE;
-
-    return apply_bank(handle, filter);
-}
-#endif
 
 } // 匿名命名空间
 
@@ -686,31 +599,6 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
     if (has_shared_filter_banks(handle_) && shared_filter_bus_started(handle_))
         return Status::InvalidState;
 #endif
-
-    if (const auto* split = std::get_if<FilterBankSplit>(&config))
-    {
-#if CAN_DRIVER_BXCAN_SHARED_FILTER_BANKS
-        // 单控制器型号（以及 CAN3）拥有固定的 14 bank 域，没有可移动的分界。
-        if (!has_shared_filter_banks(handle_))
-            return Status::Unsupported;
-        // CAN2SB = 0 合法：此时整个域都归 CAN2。上界为共享域的 bank 总数。
-        if (split->first_can2_bank >= CAN_DRIVER_BXCAN_SHARED_FILTER_BANK_COUNT)
-            return Status::OutOfRange;
-
-        // 分界已是目标值：无需改动任何寄存器，直接成功，避免无必要地重编程 bank 0。
-        if (can2_start_bank(handle_) == split->first_can2_bank)
-            return Status::Ok;
-
-        // 改界只能借助 HAL_CAN_ConfigFilter()（它用 SlaveStartFilterBank 重写
-        // CAN2SB）。该调用在 setup 阶段会以硬件当前值快照并原样回写 master 的
-        // bank 0，因此只改分界、不破坏任何 bank 内容。调用方（公共
-        // configure_filter()）已在配置互斥保护下调用，故此处无需再加锁。
-        return reapply_shared_split(handle_, split->first_can2_bank);
-#else
-        (void)split;
-        return Status::Unsupported;
-#endif
-    }
 
     if (const auto* id_filter = std::get_if<IdFilter>(&config))
         return configure_id_bank(handle_, *id_filter);
