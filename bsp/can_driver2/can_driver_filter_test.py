@@ -1,21 +1,44 @@
 #!/usr/bin/env python3
-"""Focused host regression for the bsp/can_driver2 acceptance filters.
+"""Focused host regression for bsp/can_driver2: acceptance filters and Rx limits.
 
-Compiles the three real can_driver2 translation units against the real STM32Cube
-HAL/CMSIS headers of one family, links them with a small model of the HAL
-hardware boundary, and checks the filter behaviors of interest:
+Compiles the real can_driver2 translation units (plus the selected backend)
+against the real STM32Cube HAL/CMSIS headers of one family, links them with a
+small model of the HAL hardware boundary, and checks the behaviors of interest:
 
     python3 bsp/can_driver2/can_driver_filter_test.py --family g4 \
         --drivers /path/to/STM32Cube_FW_G4_V1.6.3/Drivers
 
 Generated shims, fixture and objects live in a temporary directory removed on
-exit. Simulated boundary: the HAL entry points the driver calls are replaced by
-an in-process model that captures the native filter descriptors and interprets
-the real Mask and action fields to decide acceptance and FIFO placement; frames
-are injected instead of arriving from a bus; the CMSIS core header is shadowed
-by an x86 intrinsic shim. Not modelled: bus timing, arbitration, error counters
-and TX completion. TX calls are inert stubs and no test path touches a
-peripheral register, so there are no board side effects.
+exit.
+
+Modelled boundary
+    The HAL entry points the driver calls are replaced by an in-process model
+    that captures the native filter descriptors and interprets the real Mask,
+    action and RxBufferIndex fields to decide acceptance and FIFO/dedicated
+    buffer placement; frames are injected instead of arriving from a bus. Every
+    callback is stored in the handle member the real HAL writes (RxFifo0Callback,
+    RxBufferNewMessageCallback ... for FDCAN, RxFifo0MsgPendingCallback ... for
+    bxCAN) and is only installed while the peripheral is stopped, exactly like
+    the real HAL, so an injected frame reaches the driver's bridge. Dedicated Rx
+    buffers only exist on the families whose HAL has FDCAN_FILTER_TO_RXBUFFER
+    (H7 in this runner, not G4); their NDAT flag is cleared only by
+    HAL_FDCAN_IsRxBufferMessageAvailable(), as the H7 HAL does, and their
+    payload stays readable until overwritten.
+
+Not modelled
+    Startup failure handling: a failed start() does not restore or unregister any
+    bridge callbacks already installed; the caller must ensure start() succeeds.
+    That is documented API behavior, not something this regression asserts, and
+    the model therefore does not inject
+    HAL start/registration/notification failures.
+    Also not modelled: bus timing, arbitration, error counters, overwrite
+    rollover and TX completion; TX writes are inert stubs and no test path
+    touches a peripheral register, so there are no board side effects. Payloads
+    are copied without honouring the element size, so the "Rx storage must hold
+    MaxDataLength" rule is verified through the InvalidConfiguration status
+    start() returns for an allocated storage that is too small, never through an
+    out-of-bounds copy. Raw Classic DLC codes 9..15 are not injected (the model
+    only produces 0..8).
 """
 
 from __future__ import annotations
@@ -43,6 +66,12 @@ FAMILIES = {
            "core_cm7.h", "7", "STM32H7xx_HAL_Driver/Inc",
            "CMSIS/Device/ST/STM32H7xx/Include", "stm32h7xx_hal_def.h", "stm32h7xx_hal_fdcan.h"),
 }
+
+# Families with a fixed FDCAN message RAM layout: their HAL Init has no Rx FIFO
+# or dedicated Rx buffer layout (3 elements of 64 bytes are hard-wired) and they
+# have no FDCAN_FILTER_TO_RXBUFFER. Only g4/h7 are reachable through this runner.
+FIXED_RAM = ("defined(STM32G4) || defined(STM32G0) || defined(STM32C0) || defined(STM32L5) || "
+             "defined(STM32H5) || defined(STM32U5) || defined(STM32U3) || defined(STM32H7RS)")
 
 HOST_CMSIS = r'''/* Host-only CMSIS core substitute (generated): the register qualifiers and
    non-ARM intrinsic surface the real HAL and device headers need. PRIMASK is a
@@ -96,24 +125,36 @@ HOST_SIM_H = r'''/* Control surface of the host HAL boundary (see hal_sim_host.c
 #ifdef __cplusplus
 extern "C" {
 #endif
-#define HOST_SIM_DROPPED      0
-#define HOST_SIM_STORED_FIFO0 1
-#define HOST_SIM_STORED_FIFO1 2
+#define HOST_SIM_DROPPED       0
+#define HOST_SIM_STORED_FIFO0  1
+#define HOST_SIM_STORED_FIFO1  2
+#define HOST_SIM_STORED_BUFFER 3 /* dedicated Rx buffer (families that have one) */
 /* Zero the model and attach it to the native handle. */
 void host_sim_reset(void* handle);
 /* Inject one standard-ID classic data frame: apply the programmed acceptance
-   filtering and raise the matching FIFO interrupt callback on acceptance. */
+   filtering (or the modelled global policy) and raise the matching interrupt
+   callback on acceptance. */
 int host_sim_deliver(uint32_t id, uint32_t length, uint8_t seed);
+/* Raise the dedicated-buffer interrupt the boundary would raise, without a new
+   frame: it calls the handle's RxBufferNewMessageCallback while that source is
+   enabled in the modelled mask (no-op on backends without dedicated buffers).
+   Used to check that reading a buffer consumed its NDAT flag. */
+void host_sim_notify_rx_buffer(void);
 #ifdef __cplusplus
 }
 #endif
 '''
 
-HAL_SIM_CPP = r'''/* Host HAL boundary for the can_driver2 filter regression (generated).
+HAL_SIM_CPP = r'''/* Host HAL boundary for the can_driver2 regression (generated).
  * Replaces only the HAL entry points the driver calls. Acceptance filtering is
  * evaluated from the native descriptors captured by HAL_*_ConfigFilter() using
  * the real Mask and action fields, so a filter whose native action does not
- * store (reject, priority-only, disabled) never delivers a frame. */
+ * store (reject, priority-only, disabled) never delivers a frame; a
+ * FDCAN_FILTER_TO_RXBUFFER element matches its FilterID1 exactly and stores into
+ * the dedicated buffer named by RxBufferIndex, exactly as the H7 HAL programs
+ * that element. Callbacks are stored in the handle members the real HAL writes
+ * and only while the peripheral is stopped, so injected frames follow the
+ * driver's own bridges. */
 #ifndef _GNU_SOURCE
 #    define _GNU_SOURCE 1
 #endif
@@ -145,19 +186,21 @@ using FdcanCb = void (*)(FDCAN_HandleTypeDef*, uint32_t);
 
 namespace
 {
-constexpr uint32_t kSlots = 16U;
-constexpr uint32_t kFifo  = 4U;
+constexpr uint32_t kSlots   = 16U;
+constexpr uint32_t kFifo    = 4U;
+constexpr uint32_t kBuffers = 2U; /* modelled dedicated Rx buffers */
 
 struct Sim
 {
     FDCAN_HandleTypeDef* handle = nullptr;
-    FdcanCb  rx_cb[2] = {};
     FDCAN_FilterTypeDef element[kSlots];
     bool     used[kSlots] = {};
     uint32_t anfs = FDCAN_ACCEPT_IN_RX_FIFO0; /* device reset default */
     HostMsg  fifo[2][kFifo];
     uint32_t count[2] = {};
-    uint32_t interrupts = 0U;
+    HostMsg  buffer[kBuffers];               /* contents stay until overwritten */
+    bool     buffer_new_data[kBuffers] = {}; /* the buffer's NDAT bit */
+    uint32_t interrupts = 0U;                /* modelled interrupt-enable mask */
 };
 
 Sim g;
@@ -168,6 +211,27 @@ uint32_t dlc_of(uint32_t length)
                                      FDCAN_DLC_BYTES_3, FDCAN_DLC_BYTES_4, FDCAN_DLC_BYTES_5,
                                      FDCAN_DLC_BYTES_6, FDCAN_DLC_BYTES_7, FDCAN_DLC_BYTES_8};
     return code[length < 9U ? length : 8U];
+}
+
+/* Elements the peripheral has for a FIFO; 0 = not allocated, so the peripheral
+   has nowhere to store a matching frame. The fixed-RAM families carry no layout
+   in Init and always have three 64-byte elements. */
+uint32_t fifo_elements(uint32_t fifo)
+{
+#if __FIXED_RAM__
+    (void)fifo;
+    return 3U;
+#else
+    return fifo == 0U ? g.handle->Init.RxFifo0ElmtsNbr : g.handle->Init.RxFifo1ElmtsNbr;
+#endif
+}
+
+bool notification_enabled(uint32_t its) { return (g.interrupts & its) != 0U; }
+
+/* The real HAL only installs a callback while the peripheral is stopped. */
+bool registration_allowed(FDCAN_HandleTypeDef* handle)
+{
+    return handle->State == HAL_FDCAN_STATE_READY;
 }
 
 bool pop(uint32_t fifo, HostMsg& out)
@@ -183,15 +247,31 @@ bool pop(uint32_t fifo, HostMsg& out)
 
 int store(const HostMsg& message, uint32_t fifo)
 {
-    if (g.count[fifo] >= kFifo)
+    if (fifo_elements(fifo) == 0U || g.count[fifo] >= kFifo)
         return HOST_SIM_DROPPED;
     g.fifo[fifo][g.count[fifo]++] = message;
     const uint32_t notification = fifo == 0U ? FDCAN_IT_RX_FIFO0_NEW_MESSAGE
                                             : FDCAN_IT_RX_FIFO1_NEW_MESSAGE;
-    if ((g.interrupts & notification) != 0U && g.rx_cb[fifo] != nullptr)
-        g.rx_cb[fifo](g.handle, notification);
+    const FdcanCb callback = fifo == 0U ? g.handle->RxFifo0Callback
+                                       : g.handle->RxFifo1Callback;
+    if (notification_enabled(notification) && callback != nullptr)
+        callback(g.handle, notification);
     return fifo == 0U ? HOST_SIM_STORED_FIFO0 : HOST_SIM_STORED_FIFO1;
 }
+
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
+int store_buffer(const HostMsg& message, uint32_t index)
+{
+    if (index >= kBuffers)
+        return HOST_SIM_DROPPED;
+    g.buffer[index]          = message;
+    g.buffer_new_data[index] = true; /* the hardware sets NDAT on reception */
+    if (notification_enabled(FDCAN_IT_RX_BUFFER_NEW_MESSAGE) &&
+        g.handle->RxBufferNewMessageCallback != nullptr)
+        g.handle->RxBufferNewMessageCallback(g.handle);
+    return HOST_SIM_STORED_BUFFER;
+}
+#endif
 } // namespace
 
 extern "C" void host_sim_reset(void* handle)
@@ -216,6 +296,17 @@ extern "C" int host_sim_deliver(uint32_t id, uint32_t length, uint8_t seed)
         const FDCAN_FilterTypeDef& filter = g.element[index];
         if (filter.IdType != FDCAN_STANDARD_ID || filter.FilterConfig == FDCAN_FILTER_DISABLE)
             continue;
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
+        if (filter.FilterConfig == FDCAN_FILTER_TO_RXBUFFER)
+        {
+            /* Dedicated Rx buffer element: the HAL stores the exact id in
+               FilterID1 and the buffer index in RxBufferIndex, so FilterType
+               and FilterID2 play no role there. */
+            if (id == filter.FilterID1)
+                return store_buffer(message, filter.RxBufferIndex);
+            continue;
+        }
+#endif
         /* Real Mask semantics for the mode the tested cases program; other
            FilterTypes are not exercised by this regression. */
         if (filter.FilterType != FDCAN_FILTER_MASK)
@@ -262,25 +353,48 @@ extern "C" HAL_StatusTypeDef HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef* h
 
 extern "C" HAL_StatusTypeDef HAL_FDCAN_RegisterCallback(FDCAN_HandleTypeDef* hfdcan, HAL_FDCAN_CallbackIDTypeDef id, void (*callback)(FDCAN_HandleTypeDef*))
 {
-    if (hfdcan == nullptr || callback == nullptr)
+    if (hfdcan == nullptr || callback == nullptr || !registration_allowed(hfdcan))
         return HAL_ERROR;
     if (id == HAL_FDCAN_TX_FIFO_EMPTY_CB_ID)
+    {
+        hfdcan->TxFifoEmptyCallback = callback;
         return HAL_OK;
+    }
 #if defined(FDCAN_FILTER_TO_RXBUFFER)
     if (id == HAL_FDCAN_RX_BUFFER_NEW_MSG_CB_ID)
+    {
+        hfdcan->RxBufferNewMessageCallback = callback;
         return HAL_OK;
+    }
 #endif
-    return HAL_ERROR;
+    return HAL_ERROR; /* the rest of the callback ids are outside this regression */
 }
 
 extern "C" HAL_StatusTypeDef HAL_FDCAN_GetRxMessage(FDCAN_HandleTypeDef* hfdcan, uint32_t location, FDCAN_RxHeaderTypeDef* header, uint8_t* data)
 {
     if (hfdcan == nullptr || header == nullptr || data == nullptr)
         return HAL_ERROR;
-    const uint32_t fifo = location == FDCAN_RX_FIFO0 ? 0U : location == FDCAN_RX_FIFO1 ? 1U : 2U;
+    if (hfdcan->State != HAL_FDCAN_STATE_BUSY)
+        return HAL_ERROR; /* the real HAL requires a running peripheral */
     HostMsg message{};
-    if (fifo == 2U || !pop(fifo, message))
-        return HAL_ERROR;
+    if (location == FDCAN_RX_FIFO0 || location == FDCAN_RX_FIFO1)
+    {
+        if (!pop(location == FDCAN_RX_FIFO0 ? 0U : 1U, message))
+            return HAL_ERROR;
+    }
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
+    else
+    {
+        /* Dedicated Rx buffer: the HAL refuses an unallocated index and leaves
+           the buffer contents and its NDAT bit alone. */
+        if (location >= hfdcan->Init.RxBuffersNbr || location >= kBuffers)
+            return HAL_ERROR;
+        message = g.buffer[location];
+    }
+#else
+    else
+        return HAL_ERROR; /* this backend has no dedicated Rx buffer */
+#endif
     *header             = FDCAN_RxHeaderTypeDef{};
     header->Identifier  = message.id;
     header->IdType      = FDCAN_STANDARD_ID;
@@ -291,22 +405,28 @@ extern "C" HAL_StatusTypeDef HAL_FDCAN_GetRxMessage(FDCAN_HandleTypeDef* hfdcan,
     return HAL_OK;
 }
 
-/* Remaining boundary surface: FIFO callbacks are recorded, the rest is inert
-   (TX and dedicated Rx buffers are outside this regression). */
+/* Remaining boundary surface: every callback lands in the handle member the
+   real HAL would write, and TX writes are inert (outside this regression). */
 extern "C" HAL_StatusTypeDef HAL_FDCAN_RegisterRxFifo0Callback(FDCAN_HandleTypeDef* h, FdcanCb cb)
-{ if (h == nullptr || cb == nullptr) return HAL_ERROR; g.rx_cb[0] = cb; return HAL_OK; }
+{ if (h == nullptr || cb == nullptr || !registration_allowed(h)) return HAL_ERROR; h->RxFifo0Callback = cb; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_FDCAN_RegisterRxFifo1Callback(FDCAN_HandleTypeDef* h, FdcanCb cb)
-{ if (h == nullptr || cb == nullptr) return HAL_ERROR; g.rx_cb[1] = cb; return HAL_OK; }
+{ if (h == nullptr || cb == nullptr || !registration_allowed(h)) return HAL_ERROR; h->RxFifo1Callback = cb; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_FDCAN_RegisterTxBufferCompleteCallback(FDCAN_HandleTypeDef* h, FdcanCb cb)
-{ return h != nullptr && cb != nullptr ? HAL_OK : HAL_ERROR; }
+{ if (h == nullptr || cb == nullptr || !registration_allowed(h)) return HAL_ERROR; h->TxBufferCompleteCallback = cb; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_FDCAN_RegisterTxBufferAbortCallback(FDCAN_HandleTypeDef* h, FdcanCb cb)
-{ return h != nullptr && cb != nullptr ? HAL_OK : HAL_ERROR; }
+{ if (h == nullptr || cb == nullptr || !registration_allowed(h)) return HAL_ERROR; h->TxBufferAbortCallback = cb; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_FDCAN_ConfigExtendedIdMask(FDCAN_HandleTypeDef* h, uint32_t mask)
 { (void)mask; return h == nullptr ? HAL_ERROR : HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_FDCAN_Start(FDCAN_HandleTypeDef* h)
 { if (h == nullptr || h->State != HAL_FDCAN_STATE_READY) return HAL_ERROR; h->State = HAL_FDCAN_STATE_BUSY; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_FDCAN_Stop(FDCAN_HandleTypeDef* h)
-{ if (h == nullptr) return HAL_ERROR; h->State = HAL_FDCAN_STATE_READY; return HAL_OK; }
+{
+    /* The real HAL refuses to stop a peripheral that is not running. */
+    if (h == nullptr || h->State != HAL_FDCAN_STATE_BUSY)
+        return HAL_ERROR;
+    h->State = HAL_FDCAN_STATE_READY;
+    return HAL_OK;
+}
 extern "C" HAL_StatusTypeDef HAL_FDCAN_ActivateNotification(FDCAN_HandleTypeDef* h, uint32_t its, uint32_t buffers)
 { (void)buffers; if (h == nullptr || h->State != HAL_FDCAN_STATE_BUSY) return HAL_ERROR; g.interrupts |= its; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_FDCAN_GetProtocolStatus(hal_decl::arg<0, decltype(&HAL_FDCAN_GetProtocolStatus)> h, FDCAN_ProtocolStatusTypeDef* status)
@@ -319,7 +439,24 @@ extern "C" HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(hal_decl::arg<0, decl
 { (void)h; (void)header; (void)data; return HAL_ERROR; }
 #if defined(FDCAN_FILTER_TO_RXBUFFER)
 extern "C" uint32_t HAL_FDCAN_IsRxBufferMessageAvailable(FDCAN_HandleTypeDef* h, uint32_t index)
-{ (void)h; (void)index; return 0U; }
+{
+    (void)h;
+    if (index >= kBuffers || !g.buffer_new_data[index])
+        return 0U;
+    g.buffer_new_data[index] = false; /* the HAL clears NDAT while querying */
+    return 1U;
+}
+extern "C" void host_sim_notify_rx_buffer(void)
+{
+    if (notification_enabled(FDCAN_IT_RX_BUFFER_NEW_MESSAGE) &&
+        g.handle->RxBufferNewMessageCallback != nullptr)
+        g.handle->RxBufferNewMessageCallback(g.handle);
+}
+#else
+extern "C" void host_sim_notify_rx_buffer(void)
+{
+    /* This backend has no dedicated Rx buffers (and no such notification). */
+}
 #endif
 
 #elif defined(HAL_CAN_MODULE_ENABLED)
@@ -348,14 +485,21 @@ struct Bank
 struct Sim
 {
     CAN_HandleTypeDef* handle = nullptr;
-    CanCb  rx_cb[2] = {};
     Bank   banks[kBanks];
     HostMsg fifo[2][kFifo];
     uint32_t count[2] = {};
-    uint32_t interrupts = 0U;
+    uint32_t interrupts = 0U; /* modelled interrupt-enable mask */
 };
 
 Sim g;
+
+bool notification_enabled(uint32_t its) { return (g.interrupts & its) != 0U; }
+
+/* The real HAL only installs a callback while the peripheral is stopped. */
+bool registration_allowed(CAN_HandleTypeDef* handle)
+{
+    return handle->State == HAL_CAN_STATE_READY;
+}
 
 int store(const HostMsg& message, uint32_t fifo)
 {
@@ -364,8 +508,10 @@ int store(const HostMsg& message, uint32_t fifo)
     g.fifo[fifo][g.count[fifo]++] = message;
     const uint32_t notification = fifo == 0U ? CAN_IT_RX_FIFO0_MSG_PENDING
                                             : CAN_IT_RX_FIFO1_MSG_PENDING;
-    if ((g.interrupts & notification) != 0U && g.rx_cb[fifo] != nullptr)
-        g.rx_cb[fifo](g.handle);
+    const CanCb callback = fifo == 0U ? g.handle->RxFifo0MsgPendingCallback
+                                     : g.handle->RxFifo1MsgPendingCallback;
+    if (notification_enabled(notification) && callback != nullptr)
+        callback(g.handle);
     return fifo == 0U ? HOST_SIM_STORED_FIFO0 : HOST_SIM_STORED_FIFO1;
 }
 } // namespace
@@ -422,6 +568,8 @@ extern "C" HAL_StatusTypeDef HAL_CAN_GetRxMessage(CAN_HandleTypeDef* hcan, uint3
 {
     if (hcan == nullptr || header == nullptr || data == nullptr)
         return HAL_ERROR;
+    if (hcan->State != HAL_CAN_STATE_LISTENING)
+        return HAL_ERROR; /* the real HAL requires a running peripheral */
     const uint32_t channel = fifo == CAN_RX_FIFO0 ? 0U : fifo == CAN_RX_FIFO1 ? 1U : 2U;
     if (channel == 2U || g.count[channel] == 0U)
         return HAL_ERROR;
@@ -438,20 +586,33 @@ extern "C" HAL_StatusTypeDef HAL_CAN_GetRxMessage(CAN_HandleTypeDef* hcan, uint3
     return HAL_OK;
 }
 
+/* Every callback lands in the handle member the real HAL would write. */
 extern "C" HAL_StatusTypeDef HAL_CAN_RegisterCallback(CAN_HandleTypeDef* hcan, HAL_CAN_CallbackIDTypeDef id, CanCb callback)
 {
-    if (hcan == nullptr || callback == nullptr)
+    if (hcan == nullptr || callback == nullptr || !registration_allowed(hcan))
         return HAL_ERROR;
-    if (id == HAL_CAN_RX_FIFO0_MSG_PENDING_CB_ID) { g.rx_cb[0] = callback; return HAL_OK; }
-    if (id == HAL_CAN_RX_FIFO1_MSG_PENDING_CB_ID) { g.rx_cb[1] = callback; return HAL_OK; }
-    /* Tx/error notifications only drive the software queue: accepted, unused. */
-    return id >= HAL_CAN_TX_MAILBOX0_COMPLETE_CB_ID && id <= HAL_CAN_ERROR_CB_ID ? HAL_OK : HAL_ERROR;
+    if (id == HAL_CAN_RX_FIFO0_MSG_PENDING_CB_ID) { hcan->RxFifo0MsgPendingCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_RX_FIFO1_MSG_PENDING_CB_ID) { hcan->RxFifo1MsgPendingCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_TX_MAILBOX0_COMPLETE_CB_ID) { hcan->TxMailbox0CompleteCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_TX_MAILBOX1_COMPLETE_CB_ID) { hcan->TxMailbox1CompleteCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_TX_MAILBOX2_COMPLETE_CB_ID) { hcan->TxMailbox2CompleteCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_TX_MAILBOX0_ABORT_CB_ID) { hcan->TxMailbox0AbortCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_TX_MAILBOX1_ABORT_CB_ID) { hcan->TxMailbox1AbortCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_TX_MAILBOX2_ABORT_CB_ID) { hcan->TxMailbox2AbortCallback = callback; return HAL_OK; }
+    if (id == HAL_CAN_ERROR_CB_ID) { hcan->ErrorCallback = callback; return HAL_OK; }
+    return HAL_ERROR; /* the rest of the callback ids are outside this regression */
 }
 
 extern "C" HAL_StatusTypeDef HAL_CAN_Start(CAN_HandleTypeDef* h)
 { if (h == nullptr || h->State != HAL_CAN_STATE_READY) return HAL_ERROR; h->State = HAL_CAN_STATE_LISTENING; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_CAN_Stop(CAN_HandleTypeDef* h)
-{ if (h == nullptr) return HAL_ERROR; h->State = HAL_CAN_STATE_READY; return HAL_OK; }
+{
+    /* The real HAL refuses to stop a peripheral that is not running. */
+    if (h == nullptr || h->State != HAL_CAN_STATE_LISTENING)
+        return HAL_ERROR;
+    h->State = HAL_CAN_STATE_READY;
+    return HAL_OK;
+}
 extern "C" HAL_StatusTypeDef HAL_CAN_ActivateNotification(CAN_HandleTypeDef* h, uint32_t its)
 { if (h == nullptr || h->State != HAL_CAN_STATE_LISTENING) return HAL_ERROR; g.interrupts |= its; return HAL_OK; }
 extern "C" HAL_StatusTypeDef HAL_CAN_DeactivateNotification(CAN_HandleTypeDef* h, uint32_t its)
@@ -463,12 +624,28 @@ extern "C" uint32_t HAL_CAN_GetTxMailboxesFreeLevel(hal_decl::arg<0, decltype(&H
 extern "C" HAL_StatusTypeDef HAL_CAN_AddTxMessage(hal_decl::arg<0, decltype(&HAL_CAN_AddTxMessage)> h, hal_decl::arg<1, decltype(&HAL_CAN_AddTxMessage)> header, hal_decl::arg<2, decltype(&HAL_CAN_AddTxMessage)> data, uint32_t* mailbox)
 { (void)h; (void)header; (void)data; (void)mailbox; return HAL_ERROR; }
 
+extern "C" void host_sim_notify_rx_buffer(void)
+{
+    /* bxCAN has no dedicated Rx buffers. */
+}
+
 #else
 #    error "can_driver2 filter test needs HAL_CAN_MODULE_ENABLED or HAL_FDCAN_MODULE_ENABLED"
 #endif
 '''
 
-FIXTURE = r'''/* can_driver2 filter regression fixture (generated; temporary). */
+FIXTURE = r'''/* can_driver2 host regression fixture (generated; temporary).
+ *
+ * Checks the acceptance filtering each configured filter programs on the native
+ * side, the Rx storage limits start() enforces for the configured message RAM,
+ * and the dedicated Rx buffers of backends that have them (payload delivery per
+ * buffer plus the NDAT flag a read consumes).
+ *
+ * The evidence is always consumer-visible: a frame either reaches the
+ * registered callback with its payload intact or it does not, and a rejection is
+ * the status start() returns. HAL failures during startup are not injected:
+ * there is no callback rollback; the caller must ensure start() succeeds.
+ */
 #include "can_driver.hpp"
 #include "host_sim.h"
 #include <cstddef>
@@ -504,7 +681,7 @@ static IdFilter id_filter(std::uint32_t index, IdType type, FilterAction action,
     return IdFilter{index, type, FilterMode::Mask, action, id1, id2, rx_buffer, calibration};
 }
 
-/* The mask-mode standard-ID filter used by most checks below. */
+/* The match-all mask-mode standard-ID filter used by most checks below. */
 static IdFilter std_filter(std::uint32_t index, FilterAction action, std::uint32_t id,
                            std::uint32_t rx_buffer = 0U, bool calibration = false)
 {
@@ -526,12 +703,19 @@ static void case_begin(const char* name)
     std::printf("[case] %s\n", name);
 }
 
+/* The registered consumer received exactly this frame, payload included. */
+static void check_frame(std::uint32_t id, std::size_t length, std::uint8_t seed)
+{
+    CHECK_INT(g_rec.calls, 1);
+    CHECK_INT(g_rec.id, id);
+    CHECK_INT(g_rec.length, length);
+    for (std::size_t i = 0; i < length && i < sizeof(g_rec.data); ++i)
+        CHECK_INT(g_rec.data[i], seed + i);
+}
+
 static void check_payload(std::uint32_t id)
 {
-    CHECK_INT(g_rec.calls, 1); CHECK_INT(g_rec.id, id);
-    CHECK_INT(g_rec.length, 4U);
-    for (std::size_t i = 0; i < 4; ++i)
-        CHECK_INT(g_rec.data[i], 0xA5U + i);
+    check_frame(id, 4U, 0xA5U);
 }
 
 #if CAN_DRIVER_FDCAN
@@ -544,7 +728,7 @@ static FDCAN_HandleTypeDef make_fdcan(std::uint32_t rx0, std::uint32_t rx1)
     handle.Init.Mode          = FDCAN_MODE_NORMAL;
     handle.Init.StdFiltersNbr = 2U;
     handle.Init.ExtFiltersNbr = 1U;
-#if !defined(STM32G4) /* fixed-RAM families have no FIFO layout in Init */
+#if !(__FIXED_RAM__) /* only the configurable-RAM families have a FIFO layout in Init */
     handle.Init.RxFifo0ElmtsNbr = rx0;    handle.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_64;
     handle.Init.RxFifo1ElmtsNbr = rx1;    handle.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_64;
     handle.Init.RxBuffersNbr = 0U;        handle.Init.RxBufferSize = FDCAN_DATA_BYTES_64;
@@ -601,7 +785,7 @@ static void case_fdcan_disable_stops_delivery()
     CHECK(HAL_FDCAN_Stop(&handle) == HAL_OK);
 }
 
-#if !defined(STM32G4) /* configurable message RAM */
+#    if !(__FIXED_RAM__) /* configurable message RAM */
 static void case_fdcan_unallocated_fifo()
 {
     case_begin("fdcan_unallocated_fifo");
@@ -612,7 +796,136 @@ static void case_fdcan_unallocated_fifo()
     CONFIGURE(bus, Status::NoCapacity, std_filter(0U, FilterAction::Fifo0, 0x123U));
     CONFIGURE(bus, Status::Ok, std_filter(0U, FilterAction::Fifo1, 0x123U));
 }
-#endif
+
+/* Full control over the configurable Rx layout of the handle under test. */
+static FDCAN_HandleTypeDef make_fdcan_layout(std::uint32_t fifo0, std::uint32_t fifo0_size,
+                                             std::uint32_t fifo1, std::uint32_t fifo1_size,
+                                             std::uint32_t buffers, std::uint32_t buffer_size)
+{
+    FDCAN_HandleTypeDef handle = make_fdcan(fifo0, fifo1);
+    handle.Init.RxFifo0ElmtSize = fifo0_size;
+    handle.Init.RxFifo1ElmtSize = fifo1_size;
+    handle.Init.RxBuffersNbr    = buffers;
+    handle.Init.RxBufferSize    = buffer_size;
+    return handle;
+}
+
+/* HAL_FDCAN_GetRxMessage() copies as many bytes as the received DLC code asks
+   for (raw Classic DLC 9..15 included) without checking the element size, so an
+   allocated Rx storage smaller than MaxDataLength must be refused by start()
+   instead of read out of bounds once the peripheral runs. */
+static void case_fdcan_small_rx_element_refused()
+{
+    struct Layout
+    {
+        std::uint32_t fifo0;
+        std::uint32_t fifo0_size;
+        std::uint32_t fifo1;
+        std::uint32_t fifo1_size;
+        std::uint32_t buffers;
+        std::uint32_t buffer_size;
+        const char*   what;
+    };
+    const Layout refused[] = {
+        { 2U, FDCAN_DATA_BYTES_32, 2U, FDCAN_DATA_BYTES_64, 0U, FDCAN_DATA_BYTES_64, "Rx FIFO0" },
+        { 2U, FDCAN_DATA_BYTES_64, 2U, FDCAN_DATA_BYTES_32, 0U, FDCAN_DATA_BYTES_64, "Rx FIFO1" },
+        { 2U, FDCAN_DATA_BYTES_64, 2U, FDCAN_DATA_BYTES_64, 1U, FDCAN_DATA_BYTES_8, "Rx buffer" },
+    };
+    for (const Layout& layout : refused)
+    {
+        case_begin("fdcan_small_rx_element_refused");
+        std::printf("       %s allocated with an element smaller than MaxDataLength\n",
+                    layout.what);
+        FDCAN_HandleTypeDef handle =
+                make_fdcan_layout(layout.fifo0, layout.fifo0_size, layout.fifo1,
+                                  layout.fifo1_size, layout.buffers, layout.buffer_size);
+        host_sim_reset(&handle);
+        Can bus(handle);
+        CHECK_STATUS(bus.register_callback(on_frame), Status::Ok);
+        CHECK_STATUS(bus.start(), Status::InvalidConfiguration);
+        CHECK_INT(handle.State, HAL_FDCAN_STATE_READY); /* refused before starting the peripheral */
+    }
+}
+
+/* 64-byte elements hold every payload the HAL can copy. */
+static void case_fdcan_rx_capacity_accepted()
+{
+    case_begin("fdcan_rx_capacity_accepted");
+    FDCAN_HandleTypeDef handle = make_fdcan_layout(2U, FDCAN_DATA_BYTES_64, 2U,
+                                                   FDCAN_DATA_BYTES_64, 0U, FDCAN_DATA_BYTES_64);
+    host_sim_reset(&handle);
+    Can bus(handle);
+    CONFIGURE(bus, Status::Ok, std_filter(0U, FilterAction::Fifo1, 0x123U));
+    CONFIGURE(bus, Status::Ok, reject_all());
+    CHECK_STATUS(bus.register_callback(on_frame), Status::Ok);
+    CHECK_STATUS(bus.start(), Status::Ok);
+    CHECK_INT(host_sim_deliver(0x123U, 8U, 0x5AU), HOST_SIM_STORED_FIFO1);
+    check_frame(0x123U, 8U, 0x5AU);
+    CHECK(HAL_FDCAN_Stop(&handle) == HAL_OK);
+}
+
+/* Storage with 0 elements is never written by the peripheral, so a leftover
+   small element size next to it must not block start; the allocated FIFO1 keeps
+   working end to end. */
+static void case_fdcan_unallocated_rx_size_ignored()
+{
+    case_begin("fdcan_unallocated_rx_size_ignored");
+    FDCAN_HandleTypeDef handle = make_fdcan_layout(0U, FDCAN_DATA_BYTES_8, 2U,
+                                                   FDCAN_DATA_BYTES_64, 0U, FDCAN_DATA_BYTES_8);
+    host_sim_reset(&handle);
+    Can bus(handle);
+    CONFIGURE(bus, Status::NoCapacity, std_filter(0U, FilterAction::Fifo0, 0x123U));
+    CONFIGURE(bus, Status::Ok, std_filter(0U, FilterAction::Fifo1, 0x123U));
+    CONFIGURE(bus, Status::Ok, reject_all());
+    CHECK_STATUS(bus.register_callback(on_frame), Status::Ok);
+    CHECK_STATUS(bus.start(), Status::Ok);
+    CHECK_INT(host_sim_deliver(0x123U, 4U, 0xA5U), HOST_SIM_STORED_FIFO1);
+    check_payload(0x123U);
+    CHECK(HAL_FDCAN_Stop(&handle) == HAL_OK);
+}
+
+#        if defined(FDCAN_FILTER_TO_RXBUFFER)
+/* Dedicated Rx buffers: per-buffer payload delivery, and the NDAT flag that
+   HAL_FDCAN_IsRxBufferMessageAvailable() clears while querying (the driver
+   queries each buffer once and then reads it). */
+static void case_fdcan_rx_buffer_delivery()
+{
+    case_begin("fdcan_rx_buffer_delivery");
+    FDCAN_HandleTypeDef handle = make_fdcan_layout(2U, FDCAN_DATA_BYTES_64, 0U,
+                                                   FDCAN_DATA_BYTES_64, 2U, FDCAN_DATA_BYTES_64);
+    host_sim_reset(&handle);
+    Can bus(handle);
+    /* A dedicated-buffer element is programmed as an exact id: the native
+       FilterID2 does not act as a mask there (it carries the buffer index),
+       so id2 must be 0 rather than a match-all mask. */
+    CONFIGURE(bus, Status::Ok,
+              id_filter(0U, IdType::Standard, FilterAction::RxBuffer, 0x123U, 0U,
+                        /*rx_buffer*/ 0U));
+    CONFIGURE(bus, Status::Ok,
+              id_filter(1U, IdType::Standard, FilterAction::RxBuffer, 0x456U, 0U,
+                        /*rx_buffer*/ 1U));
+    CONFIGURE(bus, Status::Ok, reject_all());
+    CHECK_STATUS(bus.register_callback(on_frame), Status::Ok);
+    CHECK_STATUS(bus.start(), Status::Ok);
+
+    CHECK_INT(host_sim_deliver(0x123U, 4U, 0xA5U), HOST_SIM_STORED_BUFFER);
+    check_payload(0x123U);
+    /* A notification without a new frame delivers nothing: reading the buffer
+       consumed its NDAT flag, so the stale payload is not delivered twice. */
+    g_rec = Recorder{};
+    host_sim_notify_rx_buffer();
+    CHECK_INT(g_rec.calls, 0);
+    /* ... and neither buffer reports new data any more. */
+    CHECK_INT(HAL_FDCAN_IsRxBufferMessageAvailable(&handle, 0U), 0U);
+    CHECK_INT(HAL_FDCAN_IsRxBufferMessageAvailable(&handle, 1U), 0U);
+
+    CHECK_INT(host_sim_deliver(0x456U, 8U, 0x11U), HOST_SIM_STORED_BUFFER);
+    check_frame(0x456U, 8U, 0x11U);
+    CHECK_INT(HAL_FDCAN_IsRxBufferMessageAvailable(&handle, 1U), 0U);
+    CHECK(HAL_FDCAN_Stop(&handle) == HAL_OK);
+}
+#        endif
+#    endif /* !(__FIXED_RAM__) */
 #else /* bxCAN */
 /* The identifier-width check applies to every action, including Disable, and a
    rejected request must leave the programmed bank untouched. */
@@ -681,8 +994,9 @@ static void case_payload_field_errors()
 int main()
 {
     std::setvbuf(stdout, nullptr, _IONBF, 0U);
-    std::printf("can_driver2 acceptance-filter host regression (%s backend)\n",
-                CAN_DRIVER_FDCAN ? "FDCAN" : "bxCAN");
+    std::printf("can_driver2 host regression (%s backend, queue %u, validate %d)\n",
+                CAN_DRIVER_FDCAN ? "FDCAN" : "bxCAN",
+                static_cast<unsigned>(Can::TxQueueCapacity), CAN_DRIVER_VALIDATE_TX_FRAME);
 
     case_payload_field_errors();
 #if CAN_DRIVER_FDCAN
@@ -691,8 +1005,15 @@ int main()
     run_fdcan_case("fdcan_priority_fifo1_delivers", FilterAction::PriorityFifo1,
                    HOST_SIM_STORED_FIFO1);
     case_fdcan_disable_stops_delivery();
-#    if !defined(STM32G4)
+#    if !(__FIXED_RAM__)
     case_fdcan_unallocated_fifo();
+    /* Rx storage limits of the configured message RAM */
+    case_fdcan_small_rx_element_refused();
+    case_fdcan_rx_capacity_accepted();
+    case_fdcan_unallocated_rx_size_ignored();
+#        if defined(FDCAN_FILTER_TO_RXBUFFER)
+    case_fdcan_rx_buffer_delivery();
+#        endif
 #    endif
 #else
     case_bxcan_disable();
@@ -778,8 +1099,8 @@ def main():
         emit(os.path.join(platform, "main.h"),
              MAIN_SHIM.replace("__HAL_DEF__", hal_def).replace("__HAL_MODULE__", hal_module))
         emit(os.path.join(sim, "host_sim.h"), HOST_SIM_H)
-        emit(os.path.join(sim, "hal_sim_host.cpp"), HAL_SIM_CPP)
-        emit(os.path.join(tmp, "filter_test.cpp"), FIXTURE)
+        emit(os.path.join(sim, "hal_sim_host.cpp"), HAL_SIM_CPP.replace("__FIXED_RAM__", FIXED_RAM))
+        emit(os.path.join(tmp, "filter_test.cpp"), FIXTURE.replace("__FIXED_RAM__", FIXED_RAM))
 
         defines = ["-D" + device, "-D" + hal, "-D" + callbacks,
                    "-DCAN_DRIVER_TX_QUEUE_SIZE=%d" % args.tx_queue_size,

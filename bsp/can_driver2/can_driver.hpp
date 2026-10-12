@@ -48,8 +48,8 @@
  * 接收在 ISR 上下文按注册顺序同步广播。回调不得阻塞、抛异常、销毁本总线或
  * 保存 FrameView。start() 之后的注册/过滤变更会被拒绝，且没有注销（unregister）
  * 接口。send() 为非阻塞，单核 Cortex-M 上可由任务或 ISR 调用。只保留硬件提交
- * 顺序，不保留 CAN 仲裁顺序。接收帧若大于其配置的硬件 element 会被丢弃，
- * 绝不作为看似合法但被截断的负载交付。
+ * 顺序，不保留 CAN 仲裁顺序。FDCAN 的所有已分配 Rx FIFO/Buffer element 须可
+ * 容纳 64 字节负载；容量不足时 start() 返回 InvalidConfiguration，不启动硬件。
  *
  * 过滤器配置写入指定 entry/策略，并应用后端全局设置。FDCAN 默认可能接受未匹配帧，需要拒收时
  * 显式应用 GlobalFilter{}。所有 bxCAN 共享 bank 必须在两路 HAL 初始化完成后、
@@ -187,7 +187,13 @@ public:
      *
      * 成功返回 Ok；句柄 Instance 为空返回 InvalidConfiguration；外设已被其他
      * 实例占用返回 HandleInUse；实例槽耗尽返回 NoCapacity；使能通知失败会回滚
-     * 启动并释放槽位后返回对应错误。重复 start() 返回 InvalidState。
+     * 本实例启动的硬件并释放槽位后返回对应错误。重复 start() 返回 InvalidState。
+     * FDCAN 已分配的 Rx FIFO/Buffer element 负载容量不足 64 字节时返回 InvalidConfiguration，
+     * 未分配的资源不检查 element 尺寸；板级须在 HAL Init 前配置足够容量。
+     *
+     * HAL Callback 安装不是事务：任何启动失败都不会恢复或注销已成功安装的
+     * Callback。调用方须自行保证 start() 成功，不得假定失败后句柄可直接交给
+     * 其他 owner 使用。
      */
     [[nodiscard]] Status start() noexcept;
 
@@ -335,7 +341,7 @@ private:
     // 在中断屏蔽下调用，绝不等待。
     [[nodiscard]] Status start_hardware() noexcept;       ///< 后端：启动硬件并安装回调。
     [[nodiscard]] Status enable_notifications() noexcept; ///< 后端：使能 IRQ 通知（不得等待）。
-    void                 rollback_start() noexcept; ///< 后端：使能通知失败时回滚已启动的硬件。
+    void rollback_start() noexcept; ///< 只回滚本实例启动的硬件，不恢复或注销 HAL Callback。
 #if CAN_DRIVER_VALIDATE_TX_FRAME
     [[nodiscard]] Status validate_hardware_frame(
             const FrameView& frame) const noexcept; ///< 后端能力校验（FD 支持、element 容量）。

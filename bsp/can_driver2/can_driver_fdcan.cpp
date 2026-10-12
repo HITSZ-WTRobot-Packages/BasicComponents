@@ -176,7 +176,8 @@ std::uint32_t rx_fifo_elements(const FDCAN_HandleTypeDef& handle, const bool fif
 }
 
 /// 返回某个 Rx FIFO 单个 element 的负载容量（字节）。可配置后端按 Init 给出的
-/// element 尺寸计算；固定 RAM 后端为 18 word（64 字节负载）。
+/// element 尺寸计算；固定 RAM 后端为 18 word（64 字节负载）。仅供
+/// validate_rx_capacity() 在启动前判断该存储至少能容纳 MaxDataLength。
 std::size_t rx_fifo_payload_capacity(const FDCAN_HandleTypeDef& handle, const bool fifo0) noexcept
 {
 #if CAN_DRIVER_FDCAN_FIXED_RAM
@@ -224,12 +225,35 @@ std::uint32_t rx_buffer_count(const FDCAN_HandleTypeDef& handle) noexcept
     return configured < rx_element_hardware_limit ? configured : rx_element_hardware_limit;
 }
 
-/// 返回单个专用 Rx Buffer element 的负载容量（字节），取自 Init 的 buffer 尺寸。
+/// 返回单个专用 Rx Buffer element 的负载容量（字节），取自 Init 的 buffer 尺寸；
+/// 仅供 validate_rx_capacity() 在启动前判断该存储至少能容纳 MaxDataLength。
 std::size_t rx_buffer_payload_capacity(const FDCAN_HandleTypeDef& handle) noexcept
 {
     return element_payload_capacity(handle.Init.RxBufferSize);
 }
 #endif // FDCAN_FILTER_TO_RXBUFFER
+
+/// 检查每个“已分配”的 Rx 存储是否至少能容纳 MaxDataLength 字节；不能则返回
+/// InvalidConfiguration。HAL_FDCAN_GetRxMessage() 按 DLCtoBytes[DataLength] 复制
+/// 负载而不校验 element/buffer 容量（经典帧的原始 DLC 9..15 亦然），容量不足会在
+/// 外设运行后造成 Message RAM 越界读取，事后无法修正，故必须在启动前直接拒绝。
+/// 数量为 0 的资源没有被分配、硬件不会写入，不参与判断。固定 RAM 布局的元素尺寸
+/// 恒为 18 word，无需任何配置即通过本检查。
+Status validate_rx_capacity(const FDCAN_HandleTypeDef& handle) noexcept
+{
+    if (rx_fifo_elements(handle, true) > 0U &&
+        rx_fifo_payload_capacity(handle, true) < Can::MaxDataLength)
+        return Status::InvalidConfiguration;
+    if (rx_fifo_elements(handle, false) > 0U &&
+        rx_fifo_payload_capacity(handle, false) < Can::MaxDataLength)
+        return Status::InvalidConfiguration;
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
+    if (rx_buffer_count(handle) > 0U &&
+        rx_buffer_payload_capacity(handle) < Can::MaxDataLength)
+        return Status::InvalidConfiguration;
+#endif
+    return Status::Ok;
+}
 
 /// 将单个非匹配动作翻译为 HAL 取值；拒绝损坏的判别符，以及目标 FIFO 未分配
 /// element 存储空间的 accept 目标。
@@ -418,11 +442,15 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
 
 } // namespace
 
-/// 启动 FDCAN 外设：校验 Instance 与 READY 状态、注册全部私有回调、调用
-/// HAL_FDCAN_Start()，并记录“本次启动”以便回滚。
+/// 启动 FDCAN 外设：校验 Instance 与 READY 状态、拒绝容量不足的 Rx 资源、注册全部
+/// 私有回调、调用 HAL_FDCAN_Start()，并记录“本次启动”以便回滚。
 ///
 /// 前置条件：外设已被 HAL 初始化且处于停止态（State == READY）。若 handle 为
 /// BUSY，则视为其他所有者占用，返回 InvalidState 且不做任何改动。
+///
+/// 回调安装不是事务：任何一项一旦注册成功便不会被撤销（本驱动也不注销 HAL 回调），
+/// 因此启动失败后这些桥接回调会保留，rollback_start() 只停止由本实例启动的硬件。
+/// 调用方须自行保证 start() 成功。
 Status Can::start_hardware() noexcept
 {
     // 指向非真实 FDCAN 外设的 handle 永远无法被编程；由于 USE_FULL_ASSERT 关闭，
@@ -434,6 +462,12 @@ Status Can::start_hardware() noexcept
     // BUSY 的 handle 归属于其他所有者（例如旧驱动），本实例刻意不去触碰它。
     if (handle_.State != HAL_FDCAN_STATE_READY)
         return Status::InvalidState;
+
+    // 在注册任何回调与执行 HAL Start 之前拒绝容量不足的已分配 Rx 资源：越界读取
+    // 发生在运行期且无法事后修正，故此时尚可安全放弃，不留下任何副作用。
+    const Status rx_capacity = validate_rx_capacity(handle_);
+    if (rx_capacity != Status::Ok)
+        return rx_capacity;
 
     // 私有静态回调在外设退出 INIT 模式之前安装，因为每个
     // HAL_FDCAN_Register*Callback() 都要求 State == READY。
@@ -497,8 +531,11 @@ Status Can::enable_notifications() noexcept
                    : Status::HardwareError;
 }
 
-/// 撤销由本实例执行的启动；对启动前已是 BUSY（属于其他所有者）的 handle 不做任何
-/// 处理。会忙等 CCCR.INIT/CSR，故不得在 PRIMASK 临界区内调用。
+/// 撤销由本实例执行的启动（仅停止硬件）；对启动前已是 BUSY（属于其他所有者）的
+/// handle 不做任何处理。会忙等 CCCR.INIT/CSR，故不得在 PRIMASK 临界区内调用。
+///
+/// 不回滚 HAL 回调：已安装的桥接回调会保留（本驱动不注销它们），调用方须自行保证
+/// start() 成功。
 void Can::rollback_start() noexcept
 {
     // 只撤销本实例自己执行的 start；若 start() 执行时 handle 已处于 BUSY，
@@ -688,9 +725,10 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
 /// 副作用）。本驱动遵循 HAL，不对此做任何补偿，也不手工读写 NDAT。
 ///
 /// @warning HAL_GetRxMessage() 复制负载时不校验 Rx element 容量（按
-/// DLCtoBytes[DataLength] 直接复制）。若收到的帧超出所配置 element 容量，HAL 内部可能
-/// 已越界访问 Message RAM，取帧后的长度校验无法修正它，只能把该帧判为
-/// InvalidFrame（frame.data 为空）。
+/// DLCtoBytes[DataLength] 直接复制）。本驱动因此在 start_hardware() 阶段就要求每个
+/// 已分配 Rx FIFO/buffer 至少能容纳 MaxDataLength 字节（见 validate_rx_capacity），
+/// 使运行期交付长度不可能超出容量；取帧后的长度校验无法修正 HAL 内部已发生的越界，
+/// 故不再保留。
 ///
 /// 负载直接复制进调用方提供的 @p buffer，帧只借用其中有效长度：HAL 消费 element 后
 /// 硬件即可复用该 element，不影响本次输出；取帧同时完成出队/清标志，因此同一 element
@@ -705,8 +743,7 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
 /// @retval Status::Empty          该位置已无待取数据
 /// @retval Status::InvalidArgument buffer 为空或不足以容纳 MaxDataLength 字节
 /// @retval Status::InvalidFrame   已消费并确认（acknowledge），但内容不可交付
-///                                （如 FD 远程帧、超出 element 容量的截断帧），
-///                                调用方应继续排空该位置
+///                                （如 FD 远程帧），调用方应继续排空该位置
 Status Can::read(std::uint32_t location, std::span<std::uint8_t> buffer, FrameView& frame) noexcept
 {
     // 在任何 HAL 写入或消费（出队/清标志）之前校验输出容量，避免越界写或
@@ -717,9 +754,8 @@ Status Can::read(std::uint32_t location, std::span<std::uint8_t> buffer, FrameVi
     if (handle_.State != HAL_FDCAN_STATE_BUSY)
         return Status::HardwareError;
 
-    // 一次性空判断，并计算取帧后用于长度检查的负载容量（可配置后端取 Init，
-    // 固定 RAM 后端取硬件布局）。
-    std::size_t capacity = 0U;
+    // 一次性空判断（不做任何取帧后的长度校验：已分配 Rx 资源的容量在
+    // start_hardware() 中即被要求至少容纳 MaxDataLength，见 validate_rx_capacity）。
     if (location == FDCAN_RX_FIFO0 || location == FDCAN_RX_FIFO1)
     {
         const bool fifo0 = location == FDCAN_RX_FIFO0;
@@ -727,22 +763,17 @@ Status Can::read(std::uint32_t location, std::span<std::uint8_t> buffer, FrameVi
             return Status::Empty;
         if (HAL_FDCAN_GetRxFifoFillLevel(&handle_, location) == 0U)
             return Status::Empty;
-
-        capacity = rx_fifo_payload_capacity(handle_, fifo0);
     }
 #if defined(FDCAN_FILTER_TO_RXBUFFER)
     else
     {
-        // 越界位置与已读空位置一样视为无数据；HAL 按 Init.RxBufferSize 计算 buffer
-        // 地址，故容量同样取自 buffer 尺寸。
+        // 越界位置与已读空位置一样视为无数据。
         const std::uint32_t allocated = rx_buffer_count(handle_);
         if (location >= allocated)
             return Status::Empty;
         // 会清除该 buffer 的 NDAT 位（HAL 既有副作用）；只查询这一次，随后 HAL 取帧。
         if (HAL_FDCAN_IsRxBufferMessageAvailable(&handle_, location) == 0U)
             return Status::Empty;
-
-        capacity = rx_buffer_payload_capacity(handle_);
     }
 #else
     else
@@ -785,12 +816,6 @@ Status Can::read(std::uint32_t location, std::span<std::uint8_t> buffer, FrameVi
         header.remote_length = static_cast<std::uint8_t>(length);
         frame.data           = buffer.first(0);
         return Status::Ok;
-    }
-    if (length > capacity)
-    {
-        // 这是取帧后的交付检查，不修正 HAL 内部可能已经发生的越界访问。
-        frame.data = {};
-        return Status::InvalidFrame;
     }
     frame.data = buffer.first(length);
     return Status::Ok;

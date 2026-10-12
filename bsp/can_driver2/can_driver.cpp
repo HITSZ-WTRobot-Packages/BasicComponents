@@ -94,9 +94,9 @@ void Can::release_instance() noexcept
 /// 一律拒绝，因为随后的 HAL 启动依赖可运行的中断/超时。started_ 或 starting_
 /// 已置位则拒绝重复启动。抢占注册表槽位后置 starting_，再在中断开放状态下
 /// 执行 start_hardware()；成功则在临界区内置 started_ 并 enable_notifications()
-/// （该调用不得阻塞）。任一步失败都回滚：rollback_start() 只会停止由本实例启动
-/// 的硬件（hardware_started_），绝不误停其他持有者的外设，随后清 starting_
-/// 并释放槽位。不初始化 GPIO/时序/消息 RAM/TDC。
+/// （该调用不得阻塞）。任一步失败只回滚由本实例启动的硬件，清 starting_ 并
+/// 释放槽位，不恢复或注销已安装的 HAL Callback；调用方须自行保证 start() 成功。
+/// 不初始化 GPIO/时序/消息 RAM/TDC。
 Status Can::start() noexcept
 {
     if (__get_IPSR() != 0 || __get_PRIMASK() != 0)

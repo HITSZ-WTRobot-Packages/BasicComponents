@@ -60,7 +60,7 @@ enum class Status : std::uint8_t
     Empty,                ///< 请求的位置当前无可用数据（如 RX FIFO/Buffer 为空）。
     Busy,                 ///< 硬件暂时无法受理（邮箱/FIFO/队列已满）。
     InvalidArgument,      ///< 参数非法：ID 越界、长度非法、字段组合不成立或指针为空。
-    InvalidFrame, ///< 接收帧已被消费并确认，但内容无法完整交付（截断或非法的 FD 远程帧）。
+    InvalidFrame, ///< 接收帧已被消费并确认，但字段组合非法（例如 FD 远程帧）。
     InvalidState,         ///< 当前状态不允许该操作（未 start、重复 start、非线程模式启动等）。
     InvalidConfiguration, ///< HAL 句柄或 Init 配置与操作不匹配。
     Unsupported,          ///< 该后端/硬件不支持所请求的功能或过滤器模式。
