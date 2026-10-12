@@ -6,6 +6,7 @@
 
 - bsp: 对 HAL 库的基本封装
     - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fcan_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) can_driver ：STM32 bxCAN 驱动
+    - [can_driver2](bsp/can_driver2/README.md) ：固定存储的 CAN/FDCAN 驱动
     - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fgpio_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) gpio_driver ：STM32 GPIO 封装（GPIO + PWM）
     - ethernet: 以太网与 PHY 组件
         - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Fcore&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [core](bsp/ethernet/core/README.md) ：`IPhy` 同步 PHY 契约与链路事件接口

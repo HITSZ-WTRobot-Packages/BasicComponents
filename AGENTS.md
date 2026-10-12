@@ -13,7 +13,7 @@ Each module is described by its own `cpkg.toml`. `CMakeLists.txt` files are gene
 ## Build, Test, and Development Commands
 This repository is not built standalone. The consuming STM32CubeMX project runs `cpkg sync`, which generates the per-package `CMakeLists.txt` files, and then builds with its own CMake presets.
 
-There is currently no repository-wide test runner or `ctest` setup. If you add tests, keep them beside the module under test and document the command here.
+There is currently no repository-wide test runner or `ctest` setup. If you add tests, keep them beside the module under test and document their commands in that module's own README.
 
 ## Coding Style & Naming Conventions
 Follow the existing embedded style:
@@ -23,7 +23,7 @@ Follow the existing embedded style:
 - Prefer header comments that explain usage and constraints, especially for ISR-safe or allocation-free code.
 
 ## Testing Guidelines
-Automated tests are not currently defined. For changes in low-level drivers or control code, validate behavior by compiling the affected module and checking the generated API surface. If you add tests, name them after the module under test, such as `pid_motor_test.cpp`.
+Tests are module-local, not a repository-wide suite. For changes in low-level drivers or control code, validate behavior by compiling the affected module and exercising its changed API path. Keep new tests beside the module under test and document their commands in that module's own README.
 
 ## Commit & Pull Request Guidelines
 Recent commits use scoped prefixes like `feat(traits): ...`, `fix(can): ...`, and `docs(README): ...`. Follow the same pattern: `<type>(<scope>): <summary>`.
