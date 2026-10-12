@@ -107,7 +107,8 @@ enum class SendResult : std::uint8_t
 enum class FilterMode : std::uint8_t { Mask, List, Range, RangeWithoutExtendedMask };
 /// 匹配后的处理动作。Disable/Fifo0/Fifo1 两种后端可用（Fifo0/1 要求对应 FIFO
 /// 已分配 element，否则 NoCapacity）；Reject/Priority/PriorityFifo0/
-/// PriorityFifo1/RxBuffer 仅 FDCAN 支持，bxCAN 返回 Unsupported。
+/// PriorityFifo1 仅 FDCAN 支持。RxBuffer 还要求 HAL 提供专用 RX Buffer；
+/// 固定 message RAM 的 FDCAN 系列（见 can_driver.hpp）和 bxCAN 返回 Unsupported。
 enum class FilterAction : std::uint8_t
 {
     Disable,       ///< 禁用该过滤器 element。
@@ -117,7 +118,7 @@ enum class FilterAction : std::uint8_t
     Priority,      ///< 命中帧以高优先级存储（FDCAN）。
     PriorityFifo0, ///< 以高优先级存入 Rx FIFO0（FDCAN）。
     PriorityFifo1, ///< 以高优先级存入 Rx FIFO1（FDCAN）。
-    RxBuffer,      ///< 精确匹配存入专用 Rx Buffer（FDCAN）。
+    RxBuffer,      ///< 精确匹配存入专用 Rx Buffer（仅支持该能力的 FDCAN）。
 };
 
 /**
@@ -129,8 +130,8 @@ enum class FilterAction : std::uint8_t
  * List：id1 与 id2 为两个标识符；只列一个 ID 时令 id1 == id2。
  * Range：id1/id2 为闭区间下界/上界，要求 id2 >= id1，仅 FDCAN 支持。
  * RangeWithoutExtendedMask：语义同 Range 但旁路 EIDM，仅 FDCAN 扩展 ID 列表可用。
- * RxBuffer：FDCAN 对 id1 精确匹配，要求 mode == Mask 且 id2 == 0，命中帧写入
- *   rx_buffer_index 指定的专用缓冲区。
+ * RxBuffer：支持专用 RX Buffer 的 FDCAN 对 id1 精确匹配，要求 mode == Mask
+ *   且 id2 == 0，命中帧写入 rx_buffer_index 指定的缓冲区；固定 RAM 返回 Unsupported。
  *
  * bxCAN：Mask 映射为一个 32 位掩码 bank，标准 ID 的 List 映射为同一 bank 内
  * 两个 16 位掩码项，且都保持同时接受该 ID 的数据帧与远程帧。一个 bxCAN bank
@@ -151,7 +152,7 @@ struct IdFilter
     std::uint32_t id1{};                       ///< 标识符或区间下界。
     std::uint32_t id2{};                       ///< 掩码、第二标识符或区间上界。
     std::uint32_t rx_buffer_index{};           ///< FDCAN RxBuffer 目标缓冲区下标。
-    bool calibration_message{}; ///< FDCAN 标准 ID RxBuffer 专用：标记校准报文。
+    bool calibration_message{}; ///< 专用 RxBuffer 的 FDCAN 标准 ID 校准报文标记；固定 RAM 不支持。
 };
 
 /// bxCAN filter bank 位宽：16 位两项或 32 位一项。

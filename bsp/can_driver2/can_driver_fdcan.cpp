@@ -20,6 +20,15 @@
 #    include <type_traits>
 #    include <variant>
 
+// HAL1 固定 message RAM 系列共用同一资源布局；传统 H7 与 N6 保持可配置布局。
+#    if defined(STM32G4) || defined(STM32G0) || defined(STM32C0) || \
+            defined(STM32L5) || defined(STM32H5) || defined(STM32U5) || \
+            defined(STM32U3) || defined(STM32H7RS)
+#        define CAN_DRIVER_FDCAN_FIXED_RAM 1
+#    else
+#        define CAN_DRIVER_FDCAN_FIXED_RAM 0
+#    endif
+
 namespace bsp::can
 {
 namespace
@@ -31,9 +40,19 @@ constexpr std::uint32_t extended_id_limit{ 0x1FFFFFFFU };
 constexpr std::uint32_t standard_id_limit{ 0x7FFU };
 
 // 硬件（硅）上限，与 handle 的 Init 所声明的数量无关。
+#if CAN_DRIVER_FDCAN_FIXED_RAM
+// 固定布局：标准 filter 28 个、扩展 filter 8 个、Rx FIFO0/1 和 Tx FIFO/Queue
+// 各 3 个 element，每个 data element 为 18 word（8 字节头 + 64 字节负载）。
+// 这些 HAL 的 Init 不含 FIFO 数量或 element 尺寸字段。
+constexpr std::uint32_t standard_filter_hardware_limit{ 28U };
+constexpr std::uint32_t extended_filter_hardware_limit{ 8U };
+constexpr std::uint32_t fixed_fifo_elements{ 3U };
+constexpr std::uint32_t fixed_element_words{ 18U };
+#else
 constexpr std::uint32_t standard_filter_hardware_limit{ 128U };
 constexpr std::uint32_t extended_filter_hardware_limit{ 64U };
 constexpr std::uint32_t rx_element_hardware_limit{ 64U };
+#endif
 
 /// 返回恰好能存放 @p length 个数据字节的 DLC 编码；直接使用 HAL 宏，不做位移。
 constexpr std::uint32_t dlc_from_length(const std::size_t length) noexcept
@@ -77,14 +96,48 @@ constexpr std::uint32_t dlc_from_length(const std::size_t length) noexcept
     }
 }
 
-/// 放在静态只读存储中，避免每次取帧时把查表数据复制到栈；每项只需一个字节。
-constexpr std::uint8_t dlc_byte_lengths[16] = { 0U, 1U,  2U,  3U,  4U,  5U,  6U,  7U,
-                                                8U, 12U, 16U, 20U, 24U, 32U, 48U, 64U };
-
-/// 返回某个 DLC 编码所表示的字节数；编码 9..15 不是线性递增的。
+/// 返回某个 DLC 编码所表示的字节数。编码 9..15 不随编码线性递增，故逐个映射；
+/// case 值直接使用 HAL 的 FDCAN_DLC_BYTES_* 宏，从而同时适配旧式（编码左移 16
+/// 位，如 0x00090000）与新式（原始编码，如 0x09）的定义，不假设任何固定位移。
 constexpr std::size_t bytes_from_dlc(const std::uint32_t dlc) noexcept
 {
-    return dlc < 16U ? dlc_byte_lengths[dlc] : 0U;
+    switch (dlc)
+    {
+    case FDCAN_DLC_BYTES_0:
+        return 0U;
+    case FDCAN_DLC_BYTES_1:
+        return 1U;
+    case FDCAN_DLC_BYTES_2:
+        return 2U;
+    case FDCAN_DLC_BYTES_3:
+        return 3U;
+    case FDCAN_DLC_BYTES_4:
+        return 4U;
+    case FDCAN_DLC_BYTES_5:
+        return 5U;
+    case FDCAN_DLC_BYTES_6:
+        return 6U;
+    case FDCAN_DLC_BYTES_7:
+        return 7U;
+    case FDCAN_DLC_BYTES_8:
+        return 8U;
+    case FDCAN_DLC_BYTES_12:
+        return 12U;
+    case FDCAN_DLC_BYTES_16:
+        return 16U;
+    case FDCAN_DLC_BYTES_20:
+        return 20U;
+    case FDCAN_DLC_BYTES_24:
+        return 24U;
+    case FDCAN_DLC_BYTES_32:
+        return 32U;
+    case FDCAN_DLC_BYTES_48:
+        return 48U;
+    case FDCAN_DLC_BYTES_64:
+        return 64U;
+    default:
+        return 0U;
+    }
 }
 
 /// 一个由 @p words 个 32-bit word 组成的 element，在扣除其 2 word 的头部之后
@@ -93,6 +146,90 @@ constexpr std::size_t element_payload_capacity(const std::uint32_t words) noexce
 {
     return words >= 2U ? words * 4U - 8U : 0U;
 }
+
+/// 返回指定 filter 列表（standard/extended）的可用 element 数量上限：取 Init 声明
+/// 的数量与硬件上限（固定 RAM 为 28/8，可配置 RAM 为 128/64）的较小值。HAL
+/// 仅以断言校验这些边界（此处 assert_param 已被编译移除），因此绝不能只信任 Init
+/// 中可能过大的数量；固定 RAM 上 Init 为 0 时同样必须保持 NoCapacity。
+std::uint32_t filter_capacity(const FDCAN_HandleTypeDef& handle, const bool standard) noexcept
+{
+    const std::uint32_t allocated = standard ? handle.Init.StdFiltersNbr
+                                             : handle.Init.ExtFiltersNbr;
+    const std::uint32_t hardware_max = standard ? standard_filter_hardware_limit
+                                                : extended_filter_hardware_limit;
+    return allocated < hardware_max ? allocated : hardware_max;
+}
+
+/// 返回某个 Rx FIFO 的可用 element 数量（0 表示未分配）。可配置 message RAM 的
+/// 后端取自 Init 并受硬件上限约束；固定 RAM 后端取自硬件布局。
+std::uint32_t rx_fifo_elements(const FDCAN_HandleTypeDef& handle, const bool fifo0) noexcept
+{
+#if CAN_DRIVER_FDCAN_FIXED_RAM
+    (void)handle;
+    (void)fifo0;
+    return fixed_fifo_elements;
+#else
+    const std::uint32_t configured = fifo0 ? handle.Init.RxFifo0ElmtsNbr
+                                           : handle.Init.RxFifo1ElmtsNbr;
+    return configured < rx_element_hardware_limit ? configured : rx_element_hardware_limit;
+#endif
+}
+
+/// 返回某个 Rx FIFO 单个 element 的负载容量（字节）。可配置后端按 Init 给出的
+/// element 尺寸计算；固定 RAM 后端为 18 word（64 字节负载）。
+std::size_t rx_fifo_payload_capacity(const FDCAN_HandleTypeDef& handle, const bool fifo0) noexcept
+{
+#if CAN_DRIVER_FDCAN_FIXED_RAM
+    (void)handle;
+    (void)fifo0;
+    return element_payload_capacity(fixed_element_words);
+#else
+    return element_payload_capacity(fifo0 ? handle.Init.RxFifo0ElmtSize
+                                          : handle.Init.RxFifo1ElmtSize);
+#endif
+}
+
+#if CAN_DRIVER_VALIDATE_TX_FRAME
+/// 返回 Tx FIFO/Queue 的 element 数量（0 表示未分配）。可配置后端取自 Init；
+/// 固定 RAM 后端为 3。
+std::uint32_t tx_fifo_elements(const FDCAN_HandleTypeDef& handle) noexcept
+{
+#if CAN_DRIVER_FDCAN_FIXED_RAM
+    (void)handle;
+    return fixed_fifo_elements;
+#else
+    return handle.Init.TxFifoQueueElmtsNbr;
+#endif
+}
+
+/// 返回单个 Tx element 在 2 word 头部之后可容纳的负载 word 数。可配置后端取自
+/// Init 的 element 尺寸；固定 RAM 后端为 18 word element（16 word 负载）。
+std::uint32_t tx_element_capacity_words(const FDCAN_HandleTypeDef& handle) noexcept
+{
+#if CAN_DRIVER_FDCAN_FIXED_RAM
+    (void)handle;
+    return fixed_element_words - 2U;
+#else
+    const std::uint32_t words = handle.Init.TxElmtSize;
+    return words > 2U ? words - 2U : 0U;
+#endif
+}
+#endif // CAN_DRIVER_VALIDATE_TX_FRAME
+
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
+/// 返回专用 Rx Buffer 的可用数量（0 表示未分配），受硬件上限约束。
+std::uint32_t rx_buffer_count(const FDCAN_HandleTypeDef& handle) noexcept
+{
+    const std::uint32_t configured = handle.Init.RxBuffersNbr;
+    return configured < rx_element_hardware_limit ? configured : rx_element_hardware_limit;
+}
+
+/// 返回单个专用 Rx Buffer element 的负载容量（字节），取自 Init 的 buffer 尺寸。
+std::size_t rx_buffer_payload_capacity(const FDCAN_HandleTypeDef& handle) noexcept
+{
+    return element_payload_capacity(handle.Init.RxBufferSize);
+}
+#endif // FDCAN_FILTER_TO_RXBUFFER
 
 /// 将单个非匹配动作翻译为 HAL 取值；拒绝损坏的判别符，以及目标 FIFO 未分配
 /// element 存储空间的 accept 目标。
@@ -106,12 +243,12 @@ Status map_non_matching(const FDCAN_HandleTypeDef& handle,
         native = FDCAN_REJECT;
         return Status::Ok;
     case NonMatchingAction::Fifo0:
-        if (handle.Init.RxFifo0ElmtsNbr == 0U)
+        if (rx_fifo_elements(handle, true) == 0U)
             return Status::NoCapacity;
         native = FDCAN_ACCEPT_IN_RX_FIFO0;
         return Status::Ok;
     case NonMatchingAction::Fifo1:
-        if (handle.Init.RxFifo1ElmtsNbr == 0U)
+        if (rx_fifo_elements(handle, false) == 0U)
             return Status::NoCapacity;
         native = FDCAN_ACCEPT_IN_RX_FIFO1;
         return Status::Ok;
@@ -151,16 +288,11 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
     if (filter.id_type != IdType::Standard && filter.id_type != IdType::Extended)
         return Status::InvalidArgument; // 判别符已损坏
 
-    const bool          standard     = filter.id_type == IdType::Standard;
-    const std::uint32_t id_limit     = standard ? standard_id_limit : extended_id_limit;
-    const std::uint32_t allocated    = standard ? handle.Init.StdFiltersNbr
-                                                : handle.Init.ExtFiltersNbr;
-    const std::uint32_t hardware_max = standard ? standard_filter_hardware_limit
-                                                : extended_filter_hardware_limit;
-    // HAL 仅以断言校验这些边界（此处 assert_param 已被编译移除），因此需同时
-    // 施加配置数量和硬件上限；Init 中过大的数量绝不能导致索引越出真实的
-    // filter element 数组。
-    const std::uint32_t capacity = allocated < hardware_max ? allocated : hardware_max;
+    const bool          standard = filter.id_type == IdType::Standard;
+    const std::uint32_t id_limit = standard ? standard_id_limit : extended_id_limit;
+    // 容量为 min(Init 数量, 硅上限)：固定 RAM 28/8，可配置 RAM 128/64。
+    // HAL 仅以可能被编译移除的 assert_param 校验边界，因此不能只信任 Init。
+    const std::uint32_t capacity = filter_capacity(handle, standard);
 
     if (capacity == 0U)
         return Status::NoCapacity;
@@ -219,8 +351,14 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
         native.FilterConfig = FDCAN_FILTER_TO_RXFIFO1_HP;
         break;
     case FilterAction::RxBuffer:
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
         native.FilterConfig = FDCAN_FILTER_TO_RXBUFFER;
         break;
+#else
+        // 该后端的固定 message RAM 布局没有专用 Rx Buffer，硬件无法表达
+        // 该目标；按能力缺失拒绝，且不触碰 HAL。
+        return Status::Unsupported;
+#endif
     default:
         return Status::Unsupported;
     }
@@ -232,6 +370,7 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
         filter.id2 < filter.id1)
         return Status::InvalidArgument;
 
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
     if (filter.action == FilterAction::RxBuffer)
     {
         // 在 Rx Buffer 模式下硬件忽略 filter type，并将精确匹配存入一个
@@ -241,9 +380,7 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
         if (filter.calibration_message && !standard)
             return Status::InvalidArgument; // calibration 报文仅支持标准 ID
 
-        const std::uint32_t buffer_max = handle.Init.RxBuffersNbr < rx_element_hardware_limit
-                                                 ? handle.Init.RxBuffersNbr
-                                                 : rx_element_hardware_limit;
+        const std::uint32_t buffer_max = rx_buffer_count(handle);
         if (buffer_max == 0U)
             return Status::NoCapacity;
         if (filter.rx_buffer_index >= buffer_max)
@@ -254,6 +391,7 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
         native.IsCalibrationMsg = filter.calibration_message ? 1U : 0U;
     }
     else
+#endif // FDCAN_FILTER_TO_RXBUFFER
     {
         // 当请求的是其他动作时，仅存在于 Rx Buffer 模式的字段不能被静默忽略。
         if (filter.rx_buffer_index != 0U)
@@ -265,13 +403,13 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
         // element 存储空间。
         if (filter.action == FilterAction::Fifo0 || filter.action == FilterAction::PriorityFifo0)
         {
-            if (handle.Init.RxFifo0ElmtsNbr == 0U)
+            if (rx_fifo_elements(handle, true) == 0U)
                 return Status::NoCapacity;
         }
         else if (filter.action == FilterAction::Fifo1 ||
                  filter.action == FilterAction::PriorityFifo1)
         {
-            if (handle.Init.RxFifo1ElmtsNbr == 0U)
+            if (rx_fifo_elements(handle, false) == 0U)
                 return Status::NoCapacity;
         }
 
@@ -305,9 +443,11 @@ Status Can::start_hardware() noexcept
     const bool callbacks_installed =
             HAL_FDCAN_RegisterRxFifo0Callback(&handle_, rx_fifo0_irq) == HAL_OK &&
             HAL_FDCAN_RegisterRxFifo1Callback(&handle_, rx_fifo1_irq) == HAL_OK &&
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
             HAL_FDCAN_RegisterCallback(&handle_,
                                        HAL_FDCAN_RX_BUFFER_NEW_MSG_CB_ID,
                                        rx_buffers_irq) == HAL_OK &&
+#endif
             HAL_FDCAN_RegisterTxBufferCompleteCallback(&handle_, tx_buffers_irq) == HAL_OK &&
             HAL_FDCAN_RegisterTxBufferAbortCallback(&handle_, tx_buffers_irq) == HAL_OK &&
             HAL_FDCAN_RegisterCallback(&handle_, HAL_FDCAN_TX_FIFO_EMPTY_CB_ID, tx_irq) == HAL_OK;
@@ -325,18 +465,20 @@ Status Can::start_hardware() noexcept
     return Status::Ok;
 }
 
-/// 按 Init 中实际分配的资源启用 RX/TX 中断通知：只为已分配的 Rx FIFO/buffer 打开
-/// 对应中断，且仅当存在软件 Tx 队列时才打开 Tx 中断。不涉及等待，调用方需自行
-/// 屏蔽中断。
+/// 按实际分配的资源启用 RX/TX 中断通知：只为已分配的 Rx FIFO/buffer 打开对应
+/// 中断（可配置后端取 Init，固定 RAM 后端取硬件布局），且仅当存在软件 Tx 队列时才打开
+/// Tx 中断。不涉及等待，调用方需自行屏蔽中断。
 Status Can::enable_notifications() noexcept
 {
     std::uint32_t active_its = 0U;
-    if (handle_.Init.RxFifo0ElmtsNbr > 0U)
+    if (rx_fifo_elements(handle_, true) > 0U)
         active_its |= FDCAN_IT_RX_FIFO0_NEW_MESSAGE;
-    if (handle_.Init.RxFifo1ElmtsNbr > 0U)
+    if (rx_fifo_elements(handle_, false) > 0U)
         active_its |= FDCAN_IT_RX_FIFO1_NEW_MESSAGE;
-    if (handle_.Init.RxBuffersNbr > 0U)
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
+    if (rx_buffer_count(handle_) > 0U)
         active_its |= FDCAN_IT_RX_BUFFER_NEW_MESSAGE;
+#endif
 
     // 软件 Tx 队列由完成/取消通知以及 Tx FIFO 空通知来推进，绝不会由后续的
     // send() 调用推进。没有软件队列时完全不需要任何 Tx 中断。
@@ -410,14 +552,13 @@ Status Can::validate_hardware_frame(const FrameView& frame) const noexcept
         return Status::Unsupported;
 
     // 发送始终经由 Tx FIFO/queue 进行。
-    if (handle_.Init.TxFifoQueueElmtsNbr == 0U)
+    if (tx_fifo_elements(handle_) == 0U)
         return Status::Unsupported;
 
     // HAL 将负载 word 写入 Tx element 时不校验 element 尺寸，因此放不下的帧会
     // 覆写相邻的 Message RAM。要求所配置的 element 在 2 word 头部之后能容纳
     // ceil(payload/4) 个 word。
-    const std::uint32_t tx_capacity = handle_.Init.TxElmtSize > 2U ? handle_.Init.TxElmtSize - 2U
-                                                                   : 0U;
+    const std::uint32_t tx_capacity = tx_element_capacity_words(handle_);
     if ((payload + 3U) / 4U > tx_capacity)
         return Status::Unsupported;
 
@@ -503,7 +644,10 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
             staging[index] = 0U;
     }
 
-    if (HAL_FDCAN_AddMessageToTxFifoQ(&handle_, &tx, payload) != HAL_OK)
+    // 旧版 HAL（如 STM32H7 v1.11.0）的 HAL_FDCAN_AddMessageToTxFifoQ 形参为非
+    // const uint8_t*，但其实现（FDCAN_CopyMessageToRAM）只读取负载、从不写入；
+    // 该转换对新版以 const 形参声明的同名 API 同样有效，且不复制负载。
+    if (HAL_FDCAN_AddMessageToTxFifoQ(&handle_, &tx, const_cast<std::uint8_t*>(payload)) != HAL_OK)
     {
         // 空闲级别已在上面复查，故对剩余原因分类：TX 满与 BusOff 均经 HAL 读取，
         // 不再手写 TXFQS/PSR。
@@ -518,8 +662,9 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
     return Status::Ok;
 }
 
-/// 从 @p location（FDCAN_RX_FIFO0/FIFO1，或专用 Rx buffer 索引）取出一个已接收
-/// 帧。要求外设处于 BUSY 状态，否则返回 HardwareError。
+/// 从 @p location（FDCAN_RX_FIFO0/FIFO1，或专用 Rx buffer 索引；后者仅存在于带专用
+/// Rx Buffer 的后端，G4 固定布局没有该位置，传入非 FIFO 位置视为无数据）取出一个
+/// 已接收帧。要求外设处于 BUSY 状态，否则返回 HardwareError。
 ///
 /// 唯一的取帧路径是 HAL_FDCAN_GetRxMessage()：由 HAL 完成 Message RAM 的 header/
 /// payload 复制以及出队/清标志（ack）。本驱动不再手工 peek Message RAM、解析 element、
@@ -528,8 +673,9 @@ Status Can::write(const FrameView& frame, bool padded_storage) noexcept
 ///
 /// 空判断在本函数中只做一次（先 query 再取帧），因此随后 HAL 取帧并自行确认，不会
 /// 因重复查询清掉标志而丢消息：
-///  - FIFO0/FIFO1：检查对应 Init 分配数量非 0，且 HAL_FDCAN_GetRxFifoFillLevel() 不为 0；
-///  - 专用 Rx buffer：检查 location 在 min(RxBuffersNbr, 64) 之内，且
+///  - FIFO0/FIFO1：检查其已分配 element 数量非 0（可配置后端取 Init，G4 取固定
+///    布局），且 HAL_FDCAN_GetRxFifoFillLevel() 不为 0；
+///  - 专用 Rx buffer：检查 location 在已分配数量之内，且
 ///    HAL_FDCAN_IsRxBufferMessageAvailable() 返回非 0。
 /// 这些判断不读取任何直接寄存器或 Message RAM。
 ///
@@ -574,36 +720,40 @@ Status Can::read(std::uint32_t location, std::span<std::uint8_t> buffer, FrameVi
     if (handle_.State != HAL_FDCAN_STATE_BUSY)
         return Status::HardwareError;
 
-    // 一次性空判断，并按 Init 的 Rx element wordsize 计算容量，供取帧后检查长度。
+    // 一次性空判断，并计算取帧后用于长度检查的负载容量（可配置后端取 Init，
+    // 固定 RAM 后端取硬件布局）。
     std::size_t capacity = 0U;
     if (location == FDCAN_RX_FIFO0 || location == FDCAN_RX_FIFO1)
     {
-        const bool          fifo0      = location == FDCAN_RX_FIFO0;
-        const std::uint32_t configured = fifo0 ? handle_.Init.RxFifo0ElmtsNbr
-                                               : handle_.Init.RxFifo1ElmtsNbr;
-        const std::uint32_t allocated  = std::min(configured, rx_element_hardware_limit);
-        if (allocated == 0U)
+        const bool fifo0 = location == FDCAN_RX_FIFO0;
+        if (rx_fifo_elements(handle_, fifo0) == 0U)
             return Status::Empty;
         if (HAL_FDCAN_GetRxFifoFillLevel(&handle_, location) == 0U)
             return Status::Empty;
 
-        capacity = element_payload_capacity(fifo0 ? handle_.Init.RxFifo0ElmtSize
-                                                  : handle_.Init.RxFifo1ElmtSize);
+        capacity = rx_fifo_payload_capacity(handle_, fifo0);
     }
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
     else
     {
         // 越界位置与已读空位置一样视为无数据；HAL 按 Init.RxBufferSize 计算 buffer
-        // 地址，故容量同样取自 RxBufferSize。
-        const std::uint32_t allocated = std::min(handle_.Init.RxBuffersNbr,
-                                                 rx_element_hardware_limit);
+        // 地址，故容量同样取自 buffer 尺寸。
+        const std::uint32_t allocated = rx_buffer_count(handle_);
         if (location >= allocated)
             return Status::Empty;
         // 会清除该 buffer 的 NDAT 位（HAL 既有副作用）；只查询这一次，随后 HAL 取帧。
         if (HAL_FDCAN_IsRxBufferMessageAvailable(&handle_, location) == 0U)
             return Status::Empty;
 
-        capacity = element_payload_capacity(handle_.Init.RxBufferSize);
+        capacity = rx_buffer_payload_capacity(handle_);
     }
+#else
+    else
+    {
+        // 该后端没有专用 Rx Buffer；FIFO 以外的 location 不存在待取数据。
+        return Status::Empty;
+    }
+#endif
 
     // 唯一取帧路径：无条件交给 HAL 写 buffer 并出队/清标志（ack）；本驱动不自行确认。
     FDCAN_RxHeaderTypeDef native; // 仅在 HAL_OK 后读取，所需字段均由 HAL 填充。
@@ -708,6 +858,7 @@ void Can::rx_fifo1_irq(NativeHandle* handle, std::uint32_t)
         instance->on_receive(FDCAN_RX_FIFO1);
 }
 
+#if defined(FDCAN_FILTER_TO_RXBUFFER)
 void Can::rx_buffers_irq(NativeHandle* handle)
 {
     Can* instance = find(handle);
@@ -717,12 +868,11 @@ void Can::rx_buffers_irq(NativeHandle* handle)
     // 此处只遍历配置的下标，存在性判断统一留给 read()。
     // HAL_FDCAN_IsRxBufferMessageAvailable 会清 NDAT；若此处先查询，read() 再次
     // 查询将得到“无数据”，导致漏掉该消息。不能在两个位置重复查询。
-    const std::uint32_t limit = instance->handle_.Init.RxBuffersNbr < rx_element_hardware_limit
-                                        ? instance->handle_.Init.RxBuffersNbr
-                                        : rx_element_hardware_limit;
+    const std::uint32_t limit = rx_buffer_count(instance->handle_);
     for (std::uint32_t index = 0U; index < limit; ++index)
         instance->on_receive(index);
 }
+#endif // FDCAN_FILTER_TO_RXBUFFER
 
 void Can::tx_buffers_irq(NativeHandle* handle, std::uint32_t)
 {

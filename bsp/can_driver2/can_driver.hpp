@@ -1,7 +1,43 @@
 /**
  * @file can_driver.hpp
  * @brief 固定存储的 CAN/FDCAN 包装：无堆分配、无 stop API、无 RX 队列。
- * 需要 C++20 与 HAL 回调注册支持。
+ * 面向带 CAN/FDCAN 的 STM32 MCU HAL1，需要 C++20 与 HAL 回调注册支持。
+ * 不支持 STM32MP 或 HAL2（包括 STM32C5）；不包含没有 CAN/FDCAN 外设的型号。
+ *
+ * bxCAN 后端承载 Classic CAN；FDCAN 后端承载 Classic/FD，并按当前 HAL 的
+ * FDCAN_DLC_BYTES_* 宏解码接收长度，兼容原始与移位 DLC 编码。
+ * bxCAN 目标系列：F0/F1/F2/F3/F4/F7/L4（仅 Classic CAN）。
+ * 固定 message RAM FDCAN 系列：G4/G0/C0/L5/H5/U5/U3/H7RS，Rx FIFO0/1 与
+ * Tx FIFO/Queue 固定各 3 个 64 字节负载 element。标准/扩展过滤器容量取 Init
+ * 启用数量与硬件上限 28/8 的较小值；需要过滤器时，须在 HAL Init 前设置
+ * StdFiltersNbr/ExtFiltersNbr。这些系列不支持专用 RxBuffer 或 calibration_message，
+ * 请求该功能返回 Unsupported。传统 H7（不含 H7RS）与 N6 保留可配置 RAM 布局。
+ *
+ * 兼容性验证记录（HAL1 driver 版本，不是 STM32Cube 固件包版本）：
+ * C = 真实 HAL/CMSIS 下交叉编译三个驱动翻译单元；S = 主机 HAL 边界模拟收发。
+ * 系列       代表型号   HAL1 版本          验证层级
+ * F0         F072       1.7.9              C
+ * F1         F105       1.1.10             C
+ * F2         F207       1.2.9              C
+ * F3         F303xC     1.5.9              C
+ * F4         F405       1.8.5              C
+ * F7         F767       1.3.3              C
+ * L4         L476       1.13.6             C
+ * G4         G431       1.2.7              C + S
+ * G0         G0B1       1.4.7              C + S
+ * C0         C092       1.4.1              C + S
+ * L5         L552       1.0.7              C + S
+ * H5         H563       1.7.0              C + S
+ * U5         U575       1.6.3              C + S
+ * U3         U375       1.4.0              C + S
+ * H7RS       H7S7       1.2.1              C + S
+ * 传统 H7    H723       1.11.0 / 1.11.6    C + S（移位 / 原始 DLC）
+ * N6         N657       1.4.0              C + S
+ * 代表型号覆盖 TX 校验 0/1 × 软件队列容量 0/4；所用 CMSIS 中带 CAN/FDCAN 的
+ * 160 个芯片宏另完成交叉编译（TX 校验 1、软件队列 0）。双核 H7 的 CM4/CM7
+ * 均编译验证，板级须选择 CORE_CM4/CORE_CM7，并确保同一外设仅由一个核独占；
+ * 驱动不提供跨核同步。上述证据不等于所有 HAL 历史版本或订货号的板上收发验证。
+ * 未进行板上验证；时钟、GPIO、时序、IRQ 与外设核归属仍由板级负责。
  *
  * 使用顺序：先初始化 HAL 句柄，再配置过滤器/注册回调，最后 start()。HAL 的中断
  * 处理函数仍由板级代码负责。一个 Can 独占一个句柄的回调；不得再把旧驱动挂到
@@ -326,7 +362,9 @@ private:
     static void rx_fifo0_irq(NativeHandle* handle, std::uint32_t events); ///< HAL 回调桥，运行于
                                                                           ///< ISR 上下文。
     static void rx_fifo1_irq(NativeHandle* handle, std::uint32_t events);
+#    if defined(FDCAN_FILTER_TO_RXBUFFER)
     static void rx_buffers_irq(NativeHandle* handle);
+#    endif
     static void tx_buffers_irq(NativeHandle* handle, std::uint32_t buffers);
 #else
     static void rx_fifo0_irq(NativeHandle* handle);
