@@ -341,9 +341,6 @@ Status apply_id_filter(FDCAN_HandleTypeDef& handle, const IdFilter& filter) noex
     case FilterAction::Reject:
         native.FilterConfig = FDCAN_FILTER_REJECT;
         break;
-    case FilterAction::Priority:
-        native.FilterConfig = FDCAN_FILTER_HP;
-        break;
     case FilterAction::PriorityFifo0:
         native.FilterConfig = FDCAN_FILTER_TO_RXFIFO0_HP;
         break;

@@ -30,7 +30,7 @@
  *   Status::Unsupported。
  * - BankFilter 以四个 16/32 位半字原样写入，因此硬件能表达的每种 IDE/RTR 组合
  *   都可达。
- * - Range/FD 专属动作（Priority、RxBuffer 等）、GlobalFilter 与 ExtendedIdMask
+ * - Range/FD 专属动作（PriorityFifo0/1、RxBuffer 等）、GlobalFilter 与 ExtendedIdMask
  *   在 bxCAN 上没有对应物，返回 Status::Unsupported。
  *
  * 滤波器编程完全由 HAL 主导：本后端不直接写任何滤波器寄存器（FMR/FM1R/FS1R/
@@ -171,9 +171,10 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
     if (request.index >= bank_count)
         return Status::OutOfRange;
 
-    // calibration_message/rx_buffer_index 只描述 FDCAN 的 RxBuffer，bxCAN 的
-    // FIFO bank 无法实现，故拒绝而不是忽略。
-    if (request.calibration_message || request.rx_buffer_index != 0U)
+    // 非 RxBuffer 动作的非零 buffer 索引是参数错误；bxCAN 不支持校准报文。
+    if (request.action != FilterAction::RxBuffer && request.rx_buffer_index != 0U)
+        return Status::InvalidArgument;
+    if (request.calibration_message)
         return Status::Unsupported;
 
     bool extended = false;
@@ -187,6 +188,13 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
         default:
             return Status::InvalidArgument;
     }
+
+    // id1/id2 按所选 ID 类型限幅：超出即参数非法，不截断。该检查必须在动作
+    // 分派之前完成，使 Disable 等提前返回的动作同样拒绝越界标识符，且任何非法
+    // 请求都不会触及 HAL。
+    const std::uint32_t id_limit = extended ? extended_id_limit : standard_id_limit;
+    if (request.id1 > id_limit || request.id2 > id_limit)
+        return Status::InvalidArgument;
 
     CAN_FilterTypeDef filter = make_bank();
     filter.FilterBank        = request.index;
@@ -204,7 +212,6 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
             break;
         // bxCAN 的 bank 无法拒绝、无法设置优先级，也不能充当 RxBuffer。
         case FilterAction::Reject:
-        case FilterAction::Priority:
         case FilterAction::PriorityFifo0:
         case FilterAction::PriorityFifo1:
         case FilterAction::RxBuffer:
@@ -213,11 +220,6 @@ constexpr std::uint32_t filter_32_exact_extended_mask =
             return Status::InvalidArgument;
     }
     filter.FilterActivation = CAN_FILTER_ENABLE;
-
-    // id1/id2 按所选 ID 类型限幅：超出即配置非法，不截断。
-    const std::uint32_t id_limit = extended ? extended_id_limit : standard_id_limit;
-    if (request.id1 > id_limit || request.id2 > id_limit)
-        return Status::InvalidConfiguration;
 
     switch (request.mode)
     {

@@ -15,6 +15,8 @@ This repository is not built standalone. The consuming STM32CubeMX project runs 
 
 There is currently no repository-wide test runner or `ctest` setup. If you add tests, keep them beside the module under test and document the command here.
 
+`can_driver2` has a module-local filter regression using real HAL/CMSIS headers. From this library root, run `python3 bsp/can_driver2/can_driver_filter_test.py --family g4 --drivers /path/to/STM32Cube_FW_G4/Drivers --validate-tx-frame 1 --tx-queue-size 4 --sanitize` (or `--family f4` / `--family h7` with matching drivers). See README's `can_driver2` compatibility and regression sections for device, compiler and queue options. The runner generates and removes its host C++ fixtures; they are not firmware package sources.
+
 ## Coding Style & Naming Conventions
 Follow the existing embedded style:
 - Use 4-space indentation in C/C++ code.
@@ -23,7 +25,7 @@ Follow the existing embedded style:
 - Prefer header comments that explain usage and constraints, especially for ISR-safe or allocation-free code.
 
 ## Testing Guidelines
-Automated tests are not currently defined. For changes in low-level drivers or control code, validate behavior by compiling the affected module and checking the generated API surface. If you add tests, name them after the module under test, such as `pid_motor_test.cpp`.
+Tests are module-local, not a repository-wide suite. For changes in low-level drivers or control code, validate behavior by compiling the affected module and exercising its changed API path. Keep new tests beside the module, following the `can_driver_filter_test.py` naming convention when a host runner must keep generated C++ fixtures out of firmware source scanning.
 
 ## Commit & Pull Request Guidelines
 Recent commits use scoped prefixes like `feat(traits): ...`, `fix(can): ...`, and `docs(README): ...`. Follow the same pattern: `<type>(<scope>): <summary>`.

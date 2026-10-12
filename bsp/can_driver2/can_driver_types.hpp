@@ -106,8 +106,8 @@ enum class SendResult : std::uint8_t
 /// 为 FDCAN 专属，bxCAN 返回 Unsupported。
 enum class FilterMode : std::uint8_t { Mask, List, Range, RangeWithoutExtendedMask };
 /// 匹配后的处理动作。Disable/Fifo0/Fifo1 两种后端可用（Fifo0/1 要求对应 FIFO
-/// 已分配 element，否则 NoCapacity）；Reject/Priority/PriorityFifo0/
-/// PriorityFifo1 仅 FDCAN 支持。RxBuffer 还要求 HAL 提供专用 RX Buffer；
+/// 已分配 element，否则 NoCapacity）；Reject/PriorityFifo0/PriorityFifo1
+/// 仅 FDCAN 支持。RxBuffer 还要求 HAL 提供专用 RX Buffer；
 /// 固定 message RAM 的 FDCAN 系列（见 can_driver.hpp）和 bxCAN 返回 Unsupported。
 enum class FilterAction : std::uint8_t
 {
@@ -115,7 +115,6 @@ enum class FilterAction : std::uint8_t
     Fifo0,         ///< 命中帧存入 Rx FIFO0。
     Fifo1,         ///< 命中帧存入 Rx FIFO1。
     Reject,        ///< 命中帧被丢弃（FDCAN）。
-    Priority,      ///< 命中帧以高优先级存储（FDCAN）。
     PriorityFifo0, ///< 以高优先级存入 Rx FIFO0（FDCAN）。
     PriorityFifo1, ///< 以高优先级存入 Rx FIFO1（FDCAN）。
     RxBuffer,      ///< 精确匹配存入专用 Rx Buffer（仅支持该能力的 FDCAN）。

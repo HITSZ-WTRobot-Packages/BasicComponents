@@ -38,6 +38,38 @@
 
 具体使用方法请查看代码注释
 
+## can_driver2 HAL 兼容范围
+
+后端按启用的 HAL 模块选择，不按 STM32 系列名称限制：`HAL_CAN` 对应 bxCAN（Classic CAN，最多 8 字节），`HAL_FDCAN` 对应 FDCAN（Classic/FD）。要求 C++20、对应 `USE_HAL_CAN_REGISTER_CALLBACKS` 或 `USE_HAL_FDCAN_REGISTER_CALLBACKS` 为 `1`，且一个固件只能启用其中一个 HAL CAN 后端。板级代码负责 HAL 初始化和 IRQ 转发。
+
+- **STM32G4**：适配固定 Message RAM 布局，Rx FIFO0/1 各 3 个 element，Tx FIFO/Queue 3 个 element，每个数据 element 可容纳 64 字节。标准/扩展过滤器容量取 `Init.StdFiltersNbr` / `Init.ExtFiltersNbr` 与硬件上限 28/8 的较小值；须在 HAL Init 前启用所需数量，数量为 0 时配置 ID 过滤器返回 `NoCapacity`。专用 `RxBuffer` 和校准报文功能不支持，返回 `Unsupported`，不静默改为 FIFO。
+- **STM32H7**：保留从 `Init` 读取的可配置 FIFO/Buffer 数量和 element 尺寸。接收按 `FDCAN_DLC_BYTES_*` 宏反查长度，兼容旧 HAL 移位编码与新 HAL 原始编码；Classic DLC 9..15 仍按 8 字节交付，RTR 保留请求长度且负载为空。发送兼容旧 HAL 的非 const 数据参数声明，不增加负载复制。
+- **STM32F 的 bxCAN 型号**：保留单控制器 14 bank、CAN1/CAN2 共享 28 bank 和独立 CAN3 路径；只支持 Classic CAN。
+- 更广的系列兼容性与历史验证记录见 `bsp/can_driver2/can_driver.hpp` 文件头；编译或主机回归结果不等于板上时序、IRQ 和收发验收。
+
+本次修复后的驱动交叉编译覆盖 F103、F105、F405、F413、G431、G473、C092、U575、U375、H7S7、H723、N657；每个目标均编译三个驱动翻译单元，覆盖 TX 校验 0/1 和软件 TX 队列 0/4。F405、G431、H723 的过滤器主机回归也在这四种配置下通过 ASan/UBSan。未进行板上验证，也未重新验证 H7 HAL v1.11.0 或 H7 双核 CM4。
+
+配置 bxCAN 的 `IdFilter`（包括 `Disable`）时，`id1`/`id2` 超出所选 ID 位宽返回 `InvalidArgument`；非 `RxBuffer` 动作使用非零 `rx_buffer_index` 也返回 `InvalidArgument`。bxCAN 不支持的 `RxBuffer` 和校准报文请求仍返回 `Unsupported`；HAL 句柄配置错误仍返回 `InvalidConfiguration`，filter bank 索引越界仍返回 `OutOfRange`。非法禁用请求不会修改已配置的过滤器。
+
+高优先级接收必须显式选择 `FilterAction::PriorityFifo0` 或 `PriorityFifo1`，匹配帧存入指定 FIFO 并经接收回调交付。已删除没有接收目标的 `FilterAction::Priority`：原生 HP-only 动作只产生优先级元数据通知，不存储帧，而本驱动不提供该通知接口。旧调用方须改用显式 FIFO 动作；不保留别名或隐式默认 FIFO。bxCAN 对这两种 FDCAN 专属动作返回 `Unsupported`。
+
+## can_driver2 主机回归
+
+`bsp/can_driver2/can_driver_filter_test.py` 使用真实 ST HAL/CMSIS 头文件、三个实际驱动翻译单元和宿主 C++20 编译器；仅模拟 HAL 硬件边界、帧注入和 CMSIS 中断原语。临时 C++ fixtures 与构建产物自动清理，不会进入固件源文件扫描。在 BasicComponents 根目录运行：
+
+```sh
+python3 bsp/can_driver2/can_driver_filter_test.py --family f4 \
+    --drivers /path/to/STM32Cube_FW_F4/Drivers --sanitize
+python3 bsp/can_driver2/can_driver_filter_test.py --family g4 \
+    --drivers /path/to/STM32Cube_FW_G4/Drivers \
+    --validate-tx-frame 1 --tx-queue-size 4 --sanitize
+python3 bsp/can_driver2/can_driver_filter_test.py --family h7 \
+    --drivers /path/to/STM32Cube_FW_H7/Drivers \
+    --validate-tx-frame 1 --tx-queue-size 4 --sanitize
+```
+
+回归覆盖 bxCAN 标准/扩展 ID 的禁用边界、非法禁用保留原过滤器、有效禁用停止交付，以及 FDCAN `PriorityFifo0/1` 的 FIFO 路由和完整负载交付、未匹配帧拒收、禁用与未分配 FIFO 的错误。`--device` 可覆盖默认的 F405/G431/H723 芯片宏，`--cxx` 指定宿主编译器；TX 校验可选 0/1，软件队列可选 0/4。测试不模拟总线时序、仲裁、错误计数或 TX 完成，也不能替代板上验收。
+
 ## can_driver2 发送帧检查
 
 `CAN_DRIVER_VALIDATE_TX_FRAME` 默认值为 `0`，发送时不执行帧结构及后端帧能力校验；非零时启用原有校验。
