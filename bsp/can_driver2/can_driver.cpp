@@ -163,6 +163,23 @@ Status Can::configure_filter(const FilterConfig& config) noexcept
     return configure_filter_hardware(config);
 }
 
+/// 与滤波器配置共用启动前互斥与外设独占规则；TDC 立即应用，不参与运行期发送。
+Status Can::configure_tx_delay_compensation(const TxDelayCompensation& config) noexcept
+{
+    ISRGuard guard;
+    if (starting_ || started_)
+        return Status::InvalidState;
+    if (handle_.Instance == nullptr)
+        return Status::InvalidConfiguration;
+    for (auto* const instance : instances_)
+    {
+        if (instance != nullptr && instance != this &&
+            instance->handle_.Instance == handle_.Instance)
+            return Status::HandleInUse;
+    }
+    return configure_tx_delay_compensation_hardware(config);
+}
+
 /// 追加一个回调条目；仅允许启动前注册（starting_/started_ 为假），否则返回
 /// InvalidState，保证运行期回调表不变。表满返回 NoCapacity。
 Status Can::add_callback(const Callback& callback) noexcept

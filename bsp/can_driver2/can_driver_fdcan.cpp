@@ -39,6 +39,9 @@ constexpr std::uint32_t invalid_dlc = 0xFFFFFFFFU;
 constexpr std::uint32_t extended_id_limit{ 0x1FFFFFFFU };
 constexpr std::uint32_t standard_id_limit{ 0x7FFU };
 
+/// TDC 的 offset 与 filter window 都是 TDCR 中的 7-bit 字段（TDCO/TDCF）。
+constexpr std::uint32_t tdc_parameter_limit{ 0x7FU };
+
 // 硬件（硅）上限，与 handle 的 Init 所声明的数量无关。
 #if CAN_DRIVER_FDCAN_FIXED_RAM
 // 固定布局：标准 filter 28 个、扩展 filter 8 个、Rx FIFO0/1 和 Tx FIFO/Queue
@@ -860,6 +863,43 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
                 }
             },
             config);
+}
+
+/**
+ * 应用发送延迟补偿（TDC）配置。要求外设已初始化且处于 READY（HAL 只在 READY 下
+ * 写 TDCR/DBTP.TDC）；全部参数与状态检查都在任何 HAL 写入之前完成。
+ *
+ * enabled=false 时只清除 TDC 使能位：offset/filter 被忽略，也不要求 FD/BRS 帧格式
+ * 或数据段预分频，因此在为重新 HAL Init 做准备时也可调用。
+ *
+ * enabled=true 时 TDC 只有在 FD 帧格式（含 BRS）且数据段预分频为 1 或 2 时才能
+ * 正确工作；这两个条件由 HAL Init 锁进 CCCR/DBTP，运行中无法更改，故先校验并
+ * 返回 InvalidConfiguration。offset 与 filter window 是 TDCR 的 7-bit 字段，越界
+ * 返回 OutOfRange。校验通过后写入配置并使能，任一 HAL 调用失败返回 HardwareError。
+ */
+Status Can::configure_tx_delay_compensation_hardware(const TxDelayCompensation& config) noexcept
+{
+    // 指向非真实 FDCAN 外设的 handle 永远无法被编程（公共层只拒绝了 nullptr）。
+    if (!IS_FDCAN_ALL_INSTANCE(handle_.Instance))
+        return Status::InvalidConfiguration;
+    if (handle_.State != HAL_FDCAN_STATE_READY)
+        return Status::InvalidState;
+
+    if (!config.enabled)
+        return HAL_FDCAN_DisableTxDelayCompensation(&handle_) == HAL_OK ? Status::Ok
+                                                                       : Status::HardwareError;
+
+    // 先做参数与 Init 时序检查，确保在任何 HAL 写入之前就能拒绝非法请求。
+    if (config.offset_mtq > tdc_parameter_limit || config.filter_mtq > tdc_parameter_limit)
+        return Status::OutOfRange;
+    if (handle_.Init.FrameFormat != FDCAN_FRAME_FD_BRS ||
+        (handle_.Init.DataPrescaler != 1U && handle_.Init.DataPrescaler != 2U))
+        return Status::InvalidConfiguration;
+
+    if (HAL_FDCAN_ConfigTxDelayCompensation(&handle_, config.offset_mtq, config.filter_mtq) != HAL_OK)
+        return Status::HardwareError;
+    return HAL_FDCAN_EnableTxDelayCompensation(&handle_) == HAL_OK ? Status::Ok
+                                                                   : Status::HardwareError;
 }
 
 // ---------------------------------------------------------------------------

@@ -615,6 +615,13 @@ Status Can::configure_filter_hardware(const FilterConfig& config) noexcept
     return Status::Unsupported;
 }
 
+/// TDC 是 FDCAN 数据段专有的发送延迟补偿，经典 bxCAN 无任何对应硬件：直接返回
+/// Unsupported，绝不静默成功。参数的合法性不在此判断，因为任何取值都无法生效。
+Status Can::configure_tx_delay_compensation_hardware(const TxDelayCompensation&) noexcept
+{
+    return Status::Unsupported;
+}
+
 /// HAL 接收回调（FIFO0）的桥接：按 HAL handle 反查已注册的 Can 实例，若该 handle
 /// 尚未被任何实例认领则忽略。运行在中断上下文，实际取帧与用户回调派发由
 /// on_receive() -> read() 完成。

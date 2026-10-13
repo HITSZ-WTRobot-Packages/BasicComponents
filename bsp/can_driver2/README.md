@@ -9,7 +9,7 @@ STM32MP 或 HAL2（含 STM32C5），也不包含没有 CAN/FDCAN 外设的型号
 | 文件 | 内容 |
 | --- | --- |
 | `can_driver.hpp` | `Can` 类、编译期后端选择与资源配置宏；文件头含系列兼容性与验证记录 |
-| `can_driver_types.hpp` | 与 HAL 无关的帧描述（`FrameHeader`/`FrameView`）、状态码与过滤器类型 |
+| `can_driver_types.hpp` | 与 HAL 无关的帧描述（`FrameHeader`/`FrameView`）、状态码、过滤器类型与发送延迟补偿配置（`TxDelayCompensation`） |
 | `can_driver.cpp` | 实例注册表、回调派发、软件 TX 队列的共享实现 |
 | `can_driver_bxcan.cpp` | bxCAN 后端实现（仅 `HAL_CAN` 固件参与编译） |
 | `can_driver_fdcan.cpp` | FDCAN 后端实现（仅 `HAL_FDCAN` 固件参与编译） |
@@ -24,8 +24,10 @@ HAL CAN 后端（同时启用会在编译期报错）。
 | `HAL_CAN_MODULE_ENABLED` | bxCAN | Classic CAN，负载上限 8 字节 | `USE_HAL_CAN_REGISTER_CALLBACKS == 1` |
 | `HAL_FDCAN_MODULE_ENABLED` | FDCAN | Classic / FD，负载上限 64 字节 | `USE_HAL_FDCAN_REGISTER_CALLBACKS == 1` |
 
-板级代码负责 HAL 初始化（GPIO、时钟、时序、message RAM、TDC）与 IRQ 转发；驱动不初始化
-这些内容。
+板级代码负责 HAL 初始化（GPIO、时钟、时序、message RAM）与 IRQ 转发；驱动不初始化这些
+内容。TDC 参数由板级选择，可在 HAL Init 之后、`start()` 之前通过
+`configure_tx_delay_compensation()` 立即应用，也可由板级直接经 HAL 配置；不调用该 API
+就保持板级已写入的设置。`start()` 不改写 TDC。
 
 ## 系列兼容范围
 
@@ -57,11 +59,12 @@ bank 与独立 CAN3 路径。FD 格式（含 BRS/ESI）以 `Unsupported` 拒绝�
 
 ## 生命周期与线程约束
 
-使用顺序：先完成 HAL 句柄 Init，再配置过滤器与注册回调，最后 `start()`。
+使用顺序：先完成 HAL 句柄 Init，再按需配置 TDC、过滤器与注册回调，最后 `start()`。
 
 - 一个 `Can` 实例独占一个 HAL 句柄指向的外设：同一外设即使使用不同句柄也被判为冲突
   （`HandleInUse`）。句柄、`Can` 对象与被借用的回调对象必须比外设的使用期更长。
-- `start()` 安装 HAL 回调、启动硬件并使能 IRQ 通知；不初始化 GPIO/时序/message RAM/TDC。
+- `start()` 安装 HAL 回调、启动硬件并使能 IRQ 通知；不初始化 GPIO/时序/message RAM，
+  不改写 TDC（可选配置入口见「发送延迟补偿（TDC）」）。
   必须在线程模式且中断未屏蔽（`IPSR`/`PRIMASK`/`BASEPRI` 为 0）时调用，否则返回
   `InvalidState`；绝不可在 ISR 中调用，因为 HAL 启动依赖可运行的中断与 tick 超时。
 - HAL Callback 安装不是事务：任何启动失败都不会恢复或注销已成功安装的 Callback。失败时
@@ -123,6 +126,40 @@ FIFO 动作，不保留别名或隐式默认 FIFO。
 分界由编译期宏 `CAN_DRIVER_BXCAN_CAN2_START_BANK` 统一指定（随每次过滤器配置写入 HAL），
 不提供运行时分界配置。CAN3 的独立 14 bank 不受该约束。
 
+## 发送延迟补偿（TDC）
+
+`configure_tx_delay_compensation(const TxDelayCompensation&)` 是 FDCAN 专属的可选入口，
+用于在 HAL Init 之后、`start()` 之前把 TDC 设置立即写入已初始化的句柄；bxCAN 后端返回
+`Unsupported`。
+
+`TxDelayCompensation` 字段按此顺序：
+
+| 字段 | 类型 | 单位 / 含义 |
+| --- | --- | --- |
+| `enabled` | `bool` | 是否启用发送延迟补偿，默认 `false` |
+| `offset_mtq` | `std::uint32_t` | TDCO 附加偏移，单位 FDCAN 内核周期（mtq） |
+| `filter_mtq` | `std::uint32_t` | SSP 滤波器窗口，单位 FDCAN 内核周期（mtq） |
+
+调用规则与 `configure_filter()` 一致：使用与其他 API 相同的 ISRGuard，必须在 `start()`
+之前调用（否则 `InvalidState`），句柄为空返回 `InvalidConfiguration`，外设已被其他实例占用
+返回 `HandleInUse`。该 API 直接把设置写进 HAL 并立即应用，不保存配置，也不修改 `start()`、
+发送、帧或队列路径。FDCAN 的 TDC 硬件始终自动测量收发环回延迟，`offset_mtq`（TDCO）只是在
+此基础上的附加偏移；`offset_mtq == 0` 是合法取值，不是「auto 模式」，驱动不提供
+auto/manual 枚举。
+
+- `enabled == false`：只执行 Disable，忽略 `offset_mtq` / `filter_mtq`，也不检查 FD 模式与
+  数据预分频。
+- `enabled == true`：先检查 `offset_mtq` / `filter_mtq` 是否超过 127，超出返回 `OutOfRange`；
+  再要求 `Init.FrameFormat == FDCAN_FRAME_FD_BRS` 且 `Init.DataPrescaler` 为 1 或 2，否则
+  返回 `InvalidConfiguration`；通过后执行 Config 与 Enable。
+- HAL 调用失败返回 `HardwareError`；句柄 `Instance` 非法返回 `InvalidConfiguration`；句柄
+  状态不是 `READY` 返回 `InvalidState`。
+
+HAL assert 关闭时不能依赖 HAL 的参数校验，驱动自行完成上述范围与模式检查。重新执行
+HAL Init 会清除 TDC 使能位，需要再次配置。若希望 SSP 附加偏移对齐数据段普通采样点，
+可取 `offset_mtq = Init.DataPrescaler * (1 + Init.DataTimeSeg1)`、`filter_mtq = 0`；这是
+初始参数选择，不能替代板上的收发与时序验证。
+
 ## 发送
 
 `send(const FrameView&)` 为非阻塞；单核 Cortex-M 上可由任务或 ISR 调用。
@@ -181,10 +218,17 @@ void init_can()
     filter.id2     = 0x7FF;
     (void)bus.configure_filter(filter);
 
-    // 2. 接收回调（start() 之前）
+    // 2. 发送延迟补偿（start() 之前，FDCAN）
+    bsp::can::TxDelayCompensation tdc{};
+    tdc.enabled    = true;
+    tdc.offset_mtq = hfdcan1.Init.DataPrescaler * (1U + hfdcan1.Init.DataTimeSeg1);
+    tdc.filter_mtq = 0;
+    (void)bus.configure_tx_delay_compensation(tdc);
+
+    // 3. 接收回调（start() 之前）
     (void)bus.register_callback<&Motor::on_can>(motor);
 
-    // 3. 启动（须在线程模式、中断未屏蔽时调用）
+    // 4. 启动（须在线程模式、中断未屏蔽时调用）
     (void)bus.start();
 }
 
@@ -240,4 +284,5 @@ void send_frame()
 
 上述证据不等于所有 HAL 历史版本或订货号的板上收发验证。**未进行板上验证**；时钟、GPIO、
 时序、IRQ 与外设核归属仍由板级负责。主机回归与交叉编译结果都不能替代板上的总线时序、
-IRQ 与收发验收。
+IRQ 与收发验收。表中历史记录不涵盖 TDC，也不代表新增的 `configure_tx_delay_compensation()`
+入口已做过跨系列或板上验收。

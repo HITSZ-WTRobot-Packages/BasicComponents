@@ -179,7 +179,7 @@ public:
 
     /**
      * 安装该句柄的 HAL 回调、启动硬件并使能所需的 IRQ 通知。不初始化 GPIO、
-     * 时序、message RAM 或 TDC，这些须由 HAL 句柄的 Init 阶段完成。
+     * 时序或 message RAM；TDC 可在 HAL Init 后由板级或配置 API 显式设置，start 不改写。
      *
      * HAL 启动期间中断保持可用，以便基于 tick 的 HAL 超时能够推进，因此必须
      * 在线程模式且中断未屏蔽时调用（IPSR/PRIMASK/BASEPRI 非零时返回
@@ -211,13 +211,24 @@ public:
      * 不做填充或分片。总线尚未 start() 时返回 NotStarted。单核 Cortex-M 上
      * 可在任务或 ISR 中调用。
      */
-    [[nodiscard]] SendResult send(const FrameView& frame) noexcept;
+    SendResult send(const FrameView& frame) noexcept;
 
     /// 配置一个过滤器 entry 或全局策略，仅可在 start() 之前调用。资源 index 由
     /// 配置显式给出并做边界检查；越界/无容量返回 OutOfRange/NoCapacity，后端
     /// 不支持的备选项返回 Unsupported，句柄为空返回 InvalidConfiguration，外设
     /// 已被其他实例占用返回 HandleInUse。
     [[nodiscard]] Status configure_filter(const FilterConfig& config) noexcept;
+
+    /**
+     * 在 HAL Init 后、start() 前立即配置发送延迟补偿，不保存配置。FDCAN 必须为
+     * READY；启用要求 FD_BRS 模式、DataPrescaler 为 1/2，offset/filter 为 0..127 mtq。
+     * 禁用仅清除 TDC 使能位，忽略其他字段。不调用则保持已有板级配置；重新 HAL Init
+     * 后须重配。启动中/已启动或非 READY 返回 InvalidState，外设被占用返回 HandleInUse，
+     * 句柄/时序不合法返回 InvalidConfiguration，参数越界返回 OutOfRange，HAL 失败返回
+     * HardwareError；bxCAN 返回 Unsupported。
+     */
+    [[nodiscard]] Status configure_tx_delay_compensation(
+            const TxDelayCompensation& config) noexcept;
 
     /// 注册无状态函数指针回调；function 为 nullptr 返回 InvalidArgument。回调
     /// 在 ISR 上下文按注册顺序同步广播，不得阻塞、抛异常或销毁本总线。仅可在
@@ -359,10 +370,13 @@ private:
      * 的数据视图为空；调用方不得在 buffer 被复用或销毁后继续持有视图。
      * Empty 表示无数据；InvalidFrame 表示帧已消费并确认但不可交付，须继续排空。
      */
-    [[nodiscard]] Status read(std::uint32_t location, std::span<std::uint8_t> buffer,
-                              FrameView& frame) noexcept;
+    [[nodiscard]] Status read(std::uint32_t           location,
+                              std::span<std::uint8_t> buffer,
+                              FrameView&              frame) noexcept;
     [[nodiscard]] Status configure_filter_hardware(
             const FilterConfig& config) noexcept; ///< 后端：应用过滤器配置。
+    [[nodiscard]] Status configure_tx_delay_compensation_hardware(
+            const TxDelayCompensation& config) noexcept; ///< 后端：立即应用 TDC 配置，不得等待。
 
 #if CAN_DRIVER_FDCAN
     static void rx_fifo0_irq(NativeHandle* handle, std::uint32_t events); ///< HAL 回调桥，运行于

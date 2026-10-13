@@ -1,6 +1,6 @@
 /**
  * @file can_driver_types.hpp
- * @brief 与 HAL 无关的 CAN 帧描述与过滤器配置类型。
+ * @brief 与 HAL 无关的 CAN 帧描述、过滤器与发送延迟补偿配置类型。
  *
  * FrameView 的负载是借用（borrow），不持有所有权。send() 会在返回前消费该
  * 视图或把它复制进软件队列，因此调用方随后即可复用底层缓冲区。接收回调在
@@ -64,11 +64,23 @@ enum class Status : std::uint8_t
     InvalidState,         ///< 当前状态不允许该操作（未 start、重复 start、非线程模式启动等）。
     InvalidConfiguration, ///< HAL 句柄或 Init 配置与操作不匹配。
     Unsupported,          ///< 该后端/硬件不支持所请求的功能或过滤器模式。
-    OutOfRange,           ///< 资源 index 超出已配置或硬件的合法范围。
+    OutOfRange,           ///< 资源 index 或硬件参数超出合法范围。
     NoCapacity,           ///< 所需资源数量为 0（无邮箱、无 FIFO element 或 filter element）。
     HandleInUse,          ///< 该外设已被另一个 Can 实例占用。
     BusOff,               ///< 总线处于 bus-off，发送被拒。
     HardwareError,        ///< HAL 或硬件返回未分类的失败。
+};
+
+/**
+ * 发送延迟补偿配置，仅 FDCAN 支持。mtq 为 FDCAN 内核时钟周期，不是预分频后的 tq。
+ * 硬件始终自动测量环回延迟，offset_mtq 是在实测延迟之后的 SSP 附加偏移。
+ * enabled 为 false 时仅禁用补偿，其余字段被忽略；不调用配置 API 则保持板级设置。
+ */
+struct TxDelayCompensation
+{
+    bool enabled{};
+    std::uint32_t offset_mtq{}; ///< SSP 附加偏移，启用时合法范围为 0..127。
+    std::uint32_t filter_mtq{}; ///< 延迟测量过滤窗口，启用时合法范围为 0..127。
 };
 
 /**
