@@ -1,20 +1,22 @@
 /**
  * @file can_driver.hpp
  * @brief 固定存储的 CAN/FDCAN 包装：无堆分配、无 stop API、无 RX 队列。
- * 面向带 CAN/FDCAN 的 STM32 MCU HAL1，需要 C++20 与 HAL 回调注册支持。
+ * 面向带 CAN/FDCAN 的 STM32 MCU HAL1，需要 C++20、无锁 32 位原子操作与 HAL 回调注册支持。
  * 不支持 STM32MP 或 HAL2（包括 STM32C5）；不包含没有 CAN/FDCAN 外设的型号。
+ * Cortex-M0/M0+ 等不支持无锁 32 位原子读改写的目标暂不支持，不提供兼容回退。
  *
  * bxCAN 后端承载 Classic CAN；FDCAN 后端承载 Classic/FD，并按当前 HAL 的
  * FDCAN_DLC_BYTES_* 宏解码接收长度，兼容原始与移位 DLC 编码。
- * bxCAN 目标系列：F0/F1/F2/F3/F4/F7/L4（仅 Classic CAN）。
- * 固定 message RAM FDCAN 系列：G4/G0/C0/L5/H5/U5/U3/H7RS，Rx FIFO0/1 与
+ * bxCAN 目标系列：F1/F2/F3/F4/F7/L4（仅 Classic CAN）。
+ * 固定 message RAM FDCAN 系列：G4/L5/H5/U5/U3/H7RS，Rx FIFO0/1 与
  * Tx FIFO/Queue 固定各 3 个 64 字节负载 element。标准/扩展过滤器容量取 Init
  * 启用数量与硬件上限 28/8 的较小值；需要过滤器时，须在 HAL Init 前设置
  * StdFiltersNbr/ExtFiltersNbr。这些系列不支持专用 RxBuffer 或 calibration_message，
  * 请求该功能返回 Unsupported。传统 H7（不含 H7RS）与 N6 保留可配置 RAM 布局。
  *
- * 兼容性验证记录（HAL1 driver 版本，不是 STM32Cube 固件包版本）：
+ * 历史兼容性验证记录（HAL1 driver 版本，不是 STM32Cube 固件包版本）：
  * C = 真实 HAL/CMSIS 下交叉编译三个驱动翻译单元；S = 主机 HAL 边界模拟收发。
+ * 以下记录早于无锁 RX 计数要求；F0/G0/C0 不属于当前支持范围。
  * 系列       代表型号   HAL1 版本          验证层级
  * F0         F072       1.7.9              C
  * F1         F105       1.1.10             C
@@ -72,6 +74,7 @@
 #include "can_driver_types.hpp"
 
 #include <array>
+#include <atomic>
 #include <functional>
 #include <memory>
 #include <type_traits>
@@ -141,6 +144,9 @@
 
 namespace bsp::can
 {
+
+static_assert(std::atomic<std::uint32_t>::is_always_lock_free,
+              "CANDriver requires lock-free 32-bit atomics");
 
 /// 由编译期 HAL 后端选择决定的 HAL 句柄类型。
 #if CAN_DRIVER_FDCAN
@@ -212,6 +218,10 @@ public:
      * 可在任务或 ISR 中调用。
      */
     SendResult send(const FrameView& frame) noexcept;
+
+    /// 返回本实例 RX/TX 累计帧数的一致快照，不清零。单核 Cortex-M 上可由任务
+    /// 或 ISR 调用；TX 仅统计成功写入硬件的帧，入队与失败不计数。
+    [[nodiscard]] TrafficCounters counters() const noexcept;
 
     /// 配置一个过滤器 entry 或全局策略，仅可在 start() 之前调用。资源 index 由
     /// 配置显式给出并做边界检查；越界/无容量返回 OutOfRange/NoCapacity，后端
@@ -321,6 +331,9 @@ private:
     bool starting_{};         ///< start() 进行中：冻结配置并阻止重复启动。
     bool started_{};          ///< 已启动：回调与过滤器冻结，可发送/接收。
     bool hardware_started_{}; ///< 后端回滚时不得停止其他 owner 的句柄。
+
+    std::atomic<std::uint32_t> rx_frames_{};           ///< RX 无锁原子计数，不屏蔽中断。
+    std::uint32_t              tx_submitted_frames_{}; ///< TX 计数仍由既有 ISRGuard 保护。
 #if CAN_DRIVER_TX_QUEUE_SIZE > 0
     libs::RingBuffer<StoredFrame, CAN_DRIVER_TX_QUEUE_SIZE + 1, true>
             tx_queue_; ///< 软件 TX 队列（多一个 slot 以区分满/空）。

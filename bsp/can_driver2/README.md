@@ -4,12 +4,15 @@
 队列，面向带 CAN/FDCAN 外设的 STM32 MCU HAL1，需要 C++20 与 HAL 回调注册支持。不支持
 STM32MP 或 HAL2（含 STM32C5），也不包含没有 CAN/FDCAN 外设的型号。
 
+另要求 `std::atomic<std::uint32_t>::is_always_lock_free == true`，不满足时静态断言报错。
+Cortex-M0/M0+ 等不支持无锁 32 位原子读改写的目标暂不支持，不提供关中断兼容分支。
+
 ## 文件
 
 | 文件 | 内容 |
 | --- | --- |
 | `can_driver.hpp` | `Can` 类、编译期后端选择与资源配置宏；文件头含系列兼容性与验证记录 |
-| `can_driver_types.hpp` | 与 HAL 无关的帧描述（`FrameHeader`/`FrameView`）、状态码、过滤器类型与发送延迟补偿配置（`TxDelayCompensation`） |
+| `can_driver_types.hpp` | 与 HAL 无关的帧描述（`FrameHeader`/`FrameView`）、收发计数（`TrafficCounters`）、状态码、过滤器类型与发送延迟补偿配置（`TxDelayCompensation`） |
 | `can_driver.cpp` | 实例注册表、回调派发、软件 TX 队列的共享实现 |
 | `can_driver_bxcan.cpp` | bxCAN 后端实现（仅 `HAL_CAN` 固件参与编译） |
 | `can_driver_fdcan.cpp` | FDCAN 后端实现（仅 `HAL_FDCAN` 固件参与编译） |
@@ -33,7 +36,7 @@ HAL CAN 后端（同时启用会在编译期报错）。
 
 ### FDCAN，固定 message RAM
 
-G4 / G0 / C0 / L5 / H5 / U5 / U3 / H7RS 使用固定布局：Rx FIFO0/1 与 Tx FIFO/Queue 各 3 个
+G4 / L5 / H5 / U5 / U3 / H7RS 使用固定布局：Rx FIFO0/1 与 Tx FIFO/Queue 各 3 个
 element，每个数据 element 18 word（64 字节负载），HAL 的 `Init` 不含 FIFO 数量或 element
 尺寸字段。过滤能力取 `Init.StdFiltersNbr` / `Init.ExtFiltersNbr` 与硬件上限 28/8 的较小值：
 需要过滤器时须在 HAL Init 前启用所需数量，数量为 0 时配置 ID 过滤器返回 `NoCapacity`。专用
@@ -53,7 +56,7 @@ element，每个数据 element 18 word（64 字节负载），HAL 的 `Init` 不
 
 ### bxCAN
 
-覆盖 F0/F1/F2/F3/F4/F7/L4，只支持 Classic CAN。保留单控制器 14 bank、CAN1/CAN2 共享 28
+覆盖 F1/F2/F3/F4/F7/L4，只支持 Classic CAN。保留单控制器 14 bank、CAN1/CAN2 共享 28
 bank 与独立 CAN3 路径。FD 格式（含 BRS/ESI）以 `Unsupported` 拒绝，不降级发送。滤波器编程
 完全经 `HAL_CAN_ConfigFilter()` 完成，本后端不直接写滤波器寄存器。
 
@@ -172,6 +175,27 @@ HAL Init 会清除 TDC 使能位，需要再次配置。若希望 SSP 附加偏�
 - FD 数据长度必须精确可表示（见 `is_fd_length`），不做填充或分片。
 - Bus-off 由后端实时判断，恢复前 `write()` 返回 `BusOff`（恢复动作由板级负责）。
 
+## 收发累计计数
+
+每个 `Can` 实例独立累计 RX/TX 帧数，通过 `counters()` 返回 `TrafficCounters` 一致快照。
+RX 使用 `memory_order_relaxed` 的无锁原子自增，在广播回调前计数，不使用 `ISRGuard`。
+TX 继续复用既有发送临界区；`counters()` 仍在短 `ISRGuard` 内同时读取两项计数，保持快照语义。
+单核 Cortex-M 上可由任务或 ISR 查询；驱动不会额外屏蔽用户回调。
+
+| 字段 | 统计口径 |
+| --- | --- |
+| `rx_frames` | 成功读出并可交付的有效帧数；与回调数量无关，没有注册回调也计数。`InvalidFrame`、空队列及读取失败不计数 |
+| `tx_submitted_frames` | 成功写入硬件邮箱/FIFO 的帧数；仅入软件队列不计数，队列重放成功时才计数。`Busy`、校验失败及其他提交失败不计数，不代表最终发送成功 |
+
+```cpp
+const bsp::can::TrafficCounters counts = bus.counters();
+const std::uint32_t rx = counts.rx_frames;
+const std::uint32_t tx = counts.tx_submitted_frames;
+```
+
+计数从对象构造时的 0 开始累计，读取不清零；两个字段均为 `std::uint32_t`，达到上限后自然
+回绕。RX 不包含被硬件过滤或因溢出丢失的帧。该接口不做频率计算，也不引入时间源或周期任务。
+
 ## 编译期资源配置宏
 
 以下宏均需在所有使用本驱动的翻译单元中保持一致（通过驱动目标的编译定义统一覆盖）：
@@ -257,6 +281,8 @@ void send_frame()
 以 HAL1 driver 版本（不是 STM32Cube 固件包版本）记录，`C` = 在真实 HAL/CMSIS 下交叉编译
 三个驱动翻译单元，`S` = 主机 HAL 边界模拟收发（历史记录，`can_driver_filter_test.py` 运行
 器已移除）：
+
+以下记录保留为历史证据，不代表新增无锁 RX 计数要求下的全系列验证；F0/G0/C0 当前不支持。
 
 | 系列 | 代表型号 | HAL1 版本 | 验证层级 |
 | --- | --- | --- | --- |

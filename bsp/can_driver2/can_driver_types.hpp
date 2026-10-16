@@ -19,11 +19,23 @@ namespace bsp::can
 
 /// 标识符类型：Standard 为 11 位标准 ID，Extended 为 29 位扩展 ID；决定 id 的
 /// 有效范围与硬件 IDE 位。
-enum class IdType : std::uint8_t { Standard, Extended };
+enum class IdType : std::uint8_t
+{
+    Standard,
+    Extended
+};
 /// 帧格式：Classic 为经典 CAN 2.0，Fd 为 CAN FD；仅支持 FD 的后端可发送 Fd。
-enum class FrameFormat : std::uint8_t { Classic, Fd };
+enum class FrameFormat : std::uint8_t
+{
+    Classic,
+    Fd
+};
 /// 帧类型：Data 携带数据负载，Remote 为 RTR 远程请求帧（不携带负载）。
-enum class FrameType : std::uint8_t { Data, Remote };
+enum class FrameType : std::uint8_t
+{
+    Data,
+    Remote
+};
 
 /**
  * 帧元数据，不含负载。字段为跨后端的中立描述，与 HAL 枚举无关。
@@ -35,20 +47,32 @@ enum class FrameType : std::uint8_t { Data, Remote };
  */
 struct FrameHeader
 {
-    std::uint32_t id{};                       ///< 标识符，有效位宽由 id_type 决定。
-    IdType id_type{IdType::Standard};         ///< 决定 id 的位宽与硬件 IDE 位。
-    FrameFormat format{FrameFormat::Classic}; ///< 经典帧或 FD 帧。
-    FrameType type{FrameType::Data};          ///< 数据帧或远程请求帧。
-    bool bit_rate_switch{};                   ///< FD BRS：数据段切换到更高比特率。
-    bool error_state_indicator{}; ///< FD ESI：true 表示节点处于 error passive。
-    std::uint8_t remote_length{}; ///< 被请求的字节数，仅用于 Classic RTR。
+    std::uint32_t id{};                           ///< 标识符，有效位宽由 id_type 决定。
+    IdType        id_type{ IdType::Standard };    ///< 决定 id 的位宽与硬件 IDE 位。
+    FrameFormat   format{ FrameFormat::Classic }; ///< 经典帧或 FD 帧。
+    FrameType     type{ FrameType::Data };        ///< 数据帧或远程请求帧。
+    bool          bit_rate_switch{};              ///< FD BRS：数据段切换到更高比特率。
+    bool          error_state_indicator{};        ///< FD ESI：true 表示节点处于 error passive。
+    std::uint8_t  remote_length{};                ///< 被请求的字节数，仅用于 Classic RTR。
 };
 
 /// 一帧的只读视图：header 加借用的数据负载 span。
 struct FrameView
 {
-    FrameHeader header{};
+    FrameHeader                   header{};
     std::span<const std::uint8_t> data{}; ///< 远程帧为空；span 存活期由调用方/后端保证。
+};
+
+/// 单个 Can 实例的累计帧数快照；从对象构造起计数，uint32_t 自然回绕。
+struct TrafficCounters
+{
+    std::uint32_t rx_frames{};           ///< 成功读出并可交付的 RX 帧数，与回调数量无关。
+    std::uint32_t tx_submitted_frames{}; ///< 成功写入硬件的 TX 帧数，不保证最终发送成功。
+
+    constexpr TrafficCounters operator-(const TrafficCounters& other) const noexcept
+    {
+        return { rx_frames - other.rx_frames, tx_submitted_frames - other.tx_submitted_frames };
+    }
 };
 
 /**
@@ -60,7 +84,7 @@ enum class Status : std::uint8_t
     Empty,                ///< 请求的位置当前无可用数据（如 RX FIFO/Buffer 为空）。
     Busy,                 ///< 硬件暂时无法受理（邮箱/FIFO/队列已满）。
     InvalidArgument,      ///< 参数非法：ID 越界、长度非法、字段组合不成立或指针为空。
-    InvalidFrame, ///< 接收帧已被消费并确认，但字段组合非法（例如 FD 远程帧）。
+    InvalidFrame,         ///< 接收帧已被消费并确认，但字段组合非法（例如 FD 远程帧）。
     InvalidState,         ///< 当前状态不允许该操作（未 start、重复 start、非线程模式启动等）。
     InvalidConfiguration, ///< HAL 句柄或 Init 配置与操作不匹配。
     Unsupported,          ///< 该后端/硬件不支持所请求的功能或过滤器模式。
@@ -78,7 +102,7 @@ enum class Status : std::uint8_t
  */
 struct TxDelayCompensation
 {
-    bool enabled{};
+    bool          enabled{};
     std::uint32_t offset_mtq{}; ///< SSP 附加偏移，启用时合法范围为 0..127。
     std::uint32_t filter_mtq{}; ///< 延迟测量过滤窗口，启用时合法范围为 0..127。
 };
@@ -103,8 +127,8 @@ enum class SendResult : std::uint8_t
 /// DLC 到字节数映射中允许的 FD 长度；经典长度 0..8 也在此集合内。
 [[nodiscard]] constexpr bool is_fd_length(const std::size_t length) noexcept
 {
-    return length <= 8 || length == 12 || length == 16 || length == 20 ||
-           length == 24 || length == 32 || length == 48 || length == 64;
+    return length <= 8 || length == 12 || length == 16 || length == 20 || length == 24 ||
+           length == 32 || length == 48 || length == 64;
 }
 
 /// 校验标识符是否落在该类型可表示的位宽内（Standard ≤ 0x7FF，Extended ≤ 0x1FFFFFFF）。
@@ -116,7 +140,13 @@ enum class SendResult : std::uint8_t
 
 /// ID 匹配方式。Mask/List 两种后端都支持；Range 与 RangeWithoutExtendedMask
 /// 为 FDCAN 专属，bxCAN 返回 Unsupported。
-enum class FilterMode : std::uint8_t { Mask, List, Range, RangeWithoutExtendedMask };
+enum class FilterMode : std::uint8_t
+{
+    Mask,
+    List,
+    Range,
+    RangeWithoutExtendedMask
+};
 /// 匹配后的处理动作。Disable/Fifo0/Fifo1 两种后端可用（Fifo0/1 要求对应 FIFO
 /// 已分配 element，否则 NoCapacity）；Reject/PriorityFifo0/PriorityFifo1
 /// 仅 FDCAN 支持。RxBuffer 还要求 HAL 提供专用 RX Buffer；
@@ -156,22 +186,34 @@ enum class FilterAction : std::uint8_t
  */
 struct IdFilter
 {
-    std::uint32_t index{};                     ///< bxCAN bank 号或 FDCAN element 下标。
-    IdType id_type{IdType::Standard};          ///< 选择标准/扩展过滤器数组。
-    FilterMode mode{FilterMode::Mask};         ///< 匹配方式。
-    FilterAction action{FilterAction::Fifo0};  ///< 命中后的处理动作。
-    std::uint32_t id1{};                       ///< 标识符或区间下界。
-    std::uint32_t id2{};                       ///< 掩码、第二标识符或区间上界。
-    std::uint32_t rx_buffer_index{};           ///< FDCAN RxBuffer 目标缓冲区下标。
+    std::uint32_t index{};                       ///< bxCAN bank 号或 FDCAN element 下标。
+    IdType        id_type{ IdType::Standard };   ///< 选择标准/扩展过滤器数组。
+    FilterMode    mode{ FilterMode::Mask };      ///< 匹配方式。
+    FilterAction  action{ FilterAction::Fifo0 }; ///< 命中后的处理动作。
+    std::uint32_t id1{};                         ///< 标识符或区间下界。
+    std::uint32_t id2{};                         ///< 掩码、第二标识符或区间上界。
+    std::uint32_t rx_buffer_index{};             ///< FDCAN RxBuffer 目标缓冲区下标。
     bool calibration_message{}; ///< 专用 RxBuffer 的 FDCAN 标准 ID 校准报文标记；固定 RAM 不支持。
 };
 
 /// bxCAN filter bank 位宽：16 位两项或 32 位一项。
-enum class FilterScale : std::uint8_t { Bits16, Bits32 };
+enum class FilterScale : std::uint8_t
+{
+    Bits16,
+    Bits32
+};
 /// bxCAN bank 匹配方式：掩码或列表。
-enum class BankFilterMode : std::uint8_t { Mask, List };
+enum class BankFilterMode : std::uint8_t
+{
+    Mask,
+    List
+};
 /// 命中帧写入的 Rx FIFO。
-enum class RxFifo : std::uint8_t { Fifo0, Fifo1 };
+enum class RxFifo : std::uint8_t
+{
+    Fifo0,
+    Fifo1
+};
 
 /**
  * 完整的 bxCAN filter bank 布局，不含 HAL 类型/宏；FDCAN 返回 Unsupported。
@@ -188,20 +230,25 @@ enum class RxFifo : std::uint8_t { Fifo0, Fifo1 };
  */
 struct BankFilter
 {
-    std::uint32_t index{};               ///< bank 编号。
-    FilterScale scale{FilterScale::Bits32};       ///< 半字位宽。
-    BankFilterMode mode{BankFilterMode::Mask};    ///< 掩码或列表匹配。
-    RxFifo fifo{RxFifo::Fifo0};          ///< 命中帧写入的 FIFO。
-    bool enabled{true};                  ///< 是否使能该 bank。
-    std::uint16_t id_high{};             ///< 高位半字（键/标识符）。
-    std::uint16_t id_low{};              ///< 低位半字（键/标识符）。
-    std::uint16_t mask_high{};           ///< 高位半字掩码或第二个标识符。
-    std::uint16_t mask_low{};            ///< 低位半字掩码或第二个标识符。
+    std::uint32_t  index{};                      ///< bank 编号。
+    FilterScale    scale{ FilterScale::Bits32 }; ///< 半字位宽。
+    BankFilterMode mode{ BankFilterMode::Mask }; ///< 掩码或列表匹配。
+    RxFifo         fifo{ RxFifo::Fifo0 };        ///< 命中帧写入的 FIFO。
+    bool           enabled{ true };              ///< 是否使能该 bank。
+    std::uint16_t  id_high{};                    ///< 高位半字（键/标识符）。
+    std::uint16_t  id_low{};                     ///< 低位半字（键/标识符）。
+    std::uint16_t  mask_high{};                  ///< 高位半字掩码或第二个标识符。
+    std::uint16_t  mask_low{};                   ///< 低位半字掩码或第二个标识符。
 };
 
 /// FDCAN 全局过滤器对未命中帧的处理：拒收，或存入指定 FIFO（该 FIFO 未分配
 /// element 时返回 NoCapacity）。
-enum class NonMatchingAction : std::uint8_t { Reject, Fifo0, Fifo1 };
+enum class NonMatchingAction : std::uint8_t
+{
+    Reject,
+    Fifo0,
+    Fifo1
+};
 
 /**
  * FDCAN 全局接受规则；bxCAN 不支持（返回 Unsupported）。未显式配置时 FDCAN
@@ -209,10 +256,10 @@ enum class NonMatchingAction : std::uint8_t { Reject, Fifo0, Fifo1 };
  */
 struct GlobalFilter
 {
-    NonMatchingAction standard{NonMatchingAction::Reject}; ///< 未命中标准 ID 帧的处理。
-    NonMatchingAction extended{NonMatchingAction::Reject}; ///< 未命中扩展 ID 帧的处理。
-    bool reject_standard_remote{}; ///< 是否额外拒收标准 ID 远程帧。
-    bool reject_extended_remote{}; ///< 是否额外拒收扩展 ID 远程帧。
+    NonMatchingAction standard{ NonMatchingAction::Reject }; ///< 未命中标准 ID 帧的处理。
+    NonMatchingAction extended{ NonMatchingAction::Reject }; ///< 未命中扩展 ID 帧的处理。
+    bool              reject_standard_remote{};              ///< 是否额外拒收标准 ID 远程帧。
+    bool              reject_extended_remote{};              ///< 是否额外拒收扩展 ID 远程帧。
 };
 
 /**
@@ -222,10 +269,10 @@ struct GlobalFilter
  */
 struct ExtendedIdMask
 {
-    std::uint32_t mask{0x1fffffffU};
+    std::uint32_t mask{ 0x1fffffffU };
 };
 
 /// 过滤器配置统一入口；后端不支持的备选项返回 Unsupported。
 using FilterConfig = std::variant<IdFilter, BankFilter, GlobalFilter, ExtendedIdMask>;
 
-} // 命名空间 bsp::can
+} // namespace bsp::can

@@ -292,6 +292,7 @@ Status Can::flush_tx() noexcept
         const auto result = write(frame, true);
         if (result != Status::Ok)
             return result;
+        ++tx_submitted_frames_;
         (void)tx_queue_.pop();
     }
 #endif
@@ -319,8 +320,8 @@ SendResult Can::send(const FrameView& frame) noexcept
     result = validate_hardware_frame(frame);
     if (result != Status::Ok)
         return send_result(result);
-#elif CAN_DRIVER_TX_QUEUE_SIZE > 0
-    // 校验关闭时 result 仅承载下方 flush_tx() 的返回值。
+#else
+    // 校验关闭时 result 承载下方发送/队列操作的返回值。
     Status result;
 #endif
 
@@ -332,6 +333,8 @@ SendResult Can::send(const FrameView& frame) noexcept
     if (tx_queue_.empty())
     {
         result = write(frame, false);
+        if (result == Status::Ok)
+            ++tx_submitted_frames_;
         if (result != Status::Busy)
             return send_result(result);
     }
@@ -340,8 +343,18 @@ SendResult Can::send(const FrameView& frame) noexcept
     (void)tx_queue_.push([&frame](StoredFrame& entry) noexcept { entry.assign(frame); });
     return replaced ? SendResult::ReplacedOldest : SendResult::Queued;
 #else
-    return send_result(write(frame, false));
+    result = write(frame, false);
+    if (result == Status::Ok)
+        ++tx_submitted_frames_;
+    return send_result(result);
 #endif
+}
+
+TrafficCounters Can::counters() const noexcept
+{
+    ISRGuard guard;
+    // 保留临界区，保证 RX/TX 是同一时刻的一致快照。
+    return { rx_frames_.load(std::memory_order_relaxed), tx_submitted_frames_ };
 }
 
 /// 发送完成中断入口：仅在已启动时排空软件队列；硬件忙时本轮停止，等待下一次
@@ -362,7 +375,7 @@ void Can::on_receive(const std::uint32_t location) noexcept
     if (!started_)
         return;
     std::array<std::uint8_t, MaxDataLength> buffer;
-    FrameView frame;
+    FrameView                               frame;
     for (;;)
     {
         const auto result = read(location, buffer, frame);
@@ -370,6 +383,8 @@ void Can::on_receive(const std::uint32_t location) noexcept
             continue; // 后端已确认并释放该不可用帧，继续排空。
         if (result != Status::Ok)
             return;
+        // 只累计帧数，不承担其他数据的发布或同步。
+        rx_frames_.fetch_add(1, std::memory_order_relaxed);
         // 回调表启动后不变；用户代码在此不额外加全局中断屏蔽，FIFO IRQ 优先级
         // 由板级配置决定。frame 的数据视图仅在本轮有效，下一轮 read 会覆盖 buffer。
         for (std::size_t index = 0; index < callback_count_; ++index)
