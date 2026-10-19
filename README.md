@@ -1,39 +1,73 @@
 # BasicComponents
 
-项目基本组件
+跨 STM32 宿主项目共享的基础组件仓库，作为 Git SubModule 使用，不独立构建。依赖与包名以各包的 `cpkg.toml` 为准；构建文件由 cpkg 生成。
 
-## List
+下列索引列出全部 28 个包。`bsp/ethernet/`、`libs/control/`、`libs/math/`、`libs/utils/` 等是分类目录，不是包。链接优先指向已有包 README；尚无 README 的包链接到包目录，符号级用法见其源码 Doxygen。各驱动的 HAL、芯片能力和 RTOS 前提由对应包限定，不应从仓库共享范围推导全系列兼容性。
 
-- bsp: 对 HAL 库的基本封装
-    - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fcan_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) can_driver ：STM32 bxCAN 驱动
-    - [can_driver2](bsp/can_driver2/README.md) ：固定存储的 CAN/FDCAN 驱动
-    - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fgpio_driver&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) gpio_driver ：STM32 GPIO 封装（GPIO + PWM）
-    - ethernet: 以太网与 PHY 组件
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Fcore&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [core](bsp/ethernet/core/README.md) ：`IPhy` 同步 PHY 契约与链路事件接口
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Fphy_drivers%2Fdp83822&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [dp83822](bsp/ethernet/phy_drivers/dp83822/README.md) ：DP83822 PHY 驱动（可选 RESET_N / INT_PWDN_N）
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=bsp%2Fethernet%2Flwip_platform&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) [lwip_platform](bsp/ethernet/lwip_platform/README.md) ：持有链路线程的 STM32 ETH MAC / LwIP netif 平台
-        - udp_socket ：UDP socket 封装
+## 包索引
 
-- libs:
-    - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Fconcurrency&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) concurrency ： 并发控制库
-    - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Fcontrol&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) control : 控制算法库（PID 等）
-    - math: 数学运算库
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Fmath%2FLinearAlgebra&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) LinearAlgebra : 线性代数运算库
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Fmath%2FGeometry&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) Geometry : 几何运算库（坐标变换，四元数等）
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Fmath%2FEKF&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) EKF : 扩展卡尔曼滤波器
-    - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Ftraits&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) traits : 类特征库（NoCopy, NoDelete 等）
-    - utils 暂时不知道怎么分类的小工具
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Futils%2Fcrc&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) crc : 查表法 CRC 运算库（支持不同长度）
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Futils%2Fdeque&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) deque : 双向队列
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Futils%2Ffixed_map&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) fixed_map : 离散指针表
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=libs%2Futils%2Fring_buffer&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) ring_buffer : 环形缓冲区
-        - printf: printf
-- protocol: 通信库
-    - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=protocol%2FUartRxSync&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) UartRxSync : 带帧头同步功能的串口接收库（常用于传感器数据接收）
-    - services: 常用服务
-        - ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=services%2Fwatchdog&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github) watchdog : 看门狗服务
-- utils ![Last Update](https://img.shields.io/github/last-commit/HITSZ-WTRobot-Packages/BasicComponents?path=utils&label=%E6%9C%80%E5%90%8E%E6%9B%B4%E6%96%B0&color=2ea44f&style=flat-square&logo=github): 懒得分类的小工具
-    - static_arena: 线性内存分配器
-    - isr_lock.h: 中断保护锁
+### bsp：外设与网络组件
 
-具体使用方法请查看代码注释
+| 包目录 | cpkg 包名 | 用途 |
+| --- | --- | --- |
+| [can_driver](bsp/can_driver/) | `bsp::CANDriver` | bxCAN 驱动 |
+| [can_driver2](bsp/can_driver2/README.md) | `bsp::CANDriver2` | 固定存储 CAN/FDCAN 驱动 |
+| [gpio_driver](bsp/gpio_driver/) | `bsp::GPIO_Driver` | GPIO 与 PWM 封装 |
+| [i2c_driver](bsp/i2c_driver/README.md) | `bsp::I2CDriver` | 单 owner I2C DMA 同步封装 |
+| [ethernet/core](bsp/ethernet/core/README.md) | `EthernetPHY::Core` | 同步 PHY 契约与链路事件接口 |
+| [ethernet/phy_drivers/dp83822](bsp/ethernet/phy_drivers/dp83822/README.md) | `EthernetPHY::DP83822` | DP83822 PHY 驱动 |
+| [ethernet/lwip_platform](bsp/ethernet/lwip_platform/README.md) | `EthernetPHY::LwipPlatform` | ETH MAC / LwIP netif 链路管理 |
+| [ethernet/net/udp_socket](bsp/ethernet/net/udp_socket/) | `Ethernet::UdpSocket` | UDP socket 封装 |
+
+### libs：通用库
+
+| 包目录 | cpkg 包名 | 用途 |
+| --- | --- | --- |
+| [concurrency](libs/concurrency/) | `libs::Concurrency` | 并发控制 |
+| [control/pid_pd](libs/control/pid_pd/) | `libs::PID_PD` | PID/PD 控制 |
+| [control/pid_motor](libs/control/pid_motor/) | `libs::PIDMotor` | 电机 PID 控制 |
+| [control/mit_pd](libs/control/mit_pd/) | `libs::MIT_PD` | MIT PD 控制 |
+| [math/LinearAlgebra](libs/math/LinearAlgebra/) | `Math::LinearAlgebra` | 线性代数 |
+| [math/Geometry](libs/math/Geometry/) | `Math::Geometry` | 几何运算 |
+| [math/EKF](libs/math/EKF/) | `Math::EKF` | 扩展卡尔曼滤波 |
+| [traits](libs/traits/) | `traits` | 类型约束辅助 |
+| [utils/crc](libs/utils/crc/) | `libs::CRC` | CRC 运算 |
+| [utils/deque](libs/utils/deque/) | `libs::Deque` | 双向队列 |
+| [utils/fixed_map](libs/utils/fixed_map/) | `libs::FixedMap` | 固定容量映射 |
+| [utils/ring_buffer](libs/utils/ring_buffer/) | `libs::RingBuffer` | 环形缓冲区 |
+| [utils/printf](libs/utils/printf/) | `libs::printf` | 格式化输出 |
+
+### memory：内存与对象存储
+
+| 包目录 | cpkg 包名 | 用途 |
+| --- | --- | --- |
+| [DMABuffer](memory/DMABuffer/) | `memory::DMABuffer` | DMA 缓冲区 |
+| [StaticObject](memory/StaticObject/) | `memory::StaticObject` | 静态对象存储 |
+| [StaticArena](memory/StaticArena/) | `memory::StaticArena` | 线性内存分配器 |
+
+### protocol：协议辅助
+
+| 包目录 | cpkg 包名 | 用途 |
+| --- | --- | --- |
+| [UartRxSync](protocol/UartRxSync/) | `protocol::UartRxSync` | 带帧头同步的串口接收 |
+
+### services：运行期服务
+
+`services/` 与 `protocol/` 同级，不属于协议目录。
+
+| 包目录 | cpkg 包名 | 用途 |
+| --- | --- | --- |
+| [watchdog](services/watchdog/) | `services::Watchdog` | 看门狗服务 |
+| [i2c_update_manager](services/i2c_update_manager/README.md) | `services::I2CUpdateManager` | 单 I2C 总线周期设备调度 |
+
+### utils：共享辅助
+
+| 包目录 | cpkg 包名 | 用途 |
+| --- | --- | --- |
+| [utils](utils/) | `utils` | 中断保护锁等共享辅助函数 |
+
+## 其他目录与维护说明
+
+`bsp/ethernet/examples/` 保存历史板级示例，不含 `cpkg.toml`，不是可依赖包，也不代表通用接线或芯片兼容承诺。宿主硬件静态配置应由其 CubeMX 配置维护，不照搬特定板级示例。
+
+协作与文档归属见 [AGENTS.md](AGENTS.md)。包 README 说明生命周期、资源与集成限制；逐符号契约以包内既有 Doxygen 为准。
