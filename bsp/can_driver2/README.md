@@ -42,12 +42,10 @@
 
 接收回调在 ISR 中按注册顺序同步广播，不得阻塞、抛异常、销毁总线或保存 `FrameView`；其 data 借用内部缓冲，回调返回立即失效。仅支持启动前注册，无注销接口，表满返回 `NoCapacity`。一次 RX 中断尽量排空对应位置，已释放的 `InvalidFrame` 跳过，其余读取错误结束此次中断处理。
 
-过滤器 index 显式指定并检查容量，越界/无容量返回 `OutOfRange`/`NoCapacity`，后端不支持的配置返回 `Unsupported`。主要边界如下；字段映射与完整参数校验见类型 Doxygen。
+过滤能力取决于所选后端及宿主已分配的接收资源。过滤器类型、匹配模式、字段含义、参数约束和返回状态以 [can_driver_types.hpp](can_driver_types.hpp) 的既有 Doxygen 为准，不在 README 维护平行的符号级契约。
 
-- bxCAN 的 `IdFilter` 使用 bank 编号，Mask 不比较 RTR；标准 ID 的 List 可用，但同一 bank 内两个不同扩展 ID 的精确 List 不支持。Range、全局过滤、扩展掩码、优先级 FIFO 与专用 Rx Buffer 等 FDCAN 功能不支持。`BankFilter` 可表达硬件支持的 IDE/RTR 组合，FDCAN 不支持它。
-- FDCAN 支持 Mask/List/Range；Range 的上界不能小于下界，`RangeWithoutExtendedMask` 仅用于扩展 ID。专用 Rx Buffer 动作要求 Mask、`id2 == 0` 且目标硬件支持专用缓冲。
-- 高优先级接收必须显式选择 `PriorityFifo0` 或 `PriorityFifo1`，没有无接收目标的 `Priority` 动作。
-- FDCAN 复位默认可能接收未匹配帧，需拒收时显式配置 `GlobalFilter{}`；目标 FIFO 未分配时返回 `NoCapacity`。扩展掩码作用于全部扩展帧，默认比较全部 29 位。
+宿主须明确未匹配帧的接收策略，不能依赖 FDCAN 复位默认行为来保证拒收。
+
 - bxCAN CAN1/CAN2 共享 bank 必须在两路 HAL Init 完成后、任一总线启动前配置；共享域已有总线运行时拒绝修改。共享分界由下表宏统一决定，CAN3 独立 bank 不受影响。
 
 ## 发送延迟补偿（TDC）
