@@ -26,7 +26,7 @@
 ## 线程、资源与锁序
 
 - 线程控制块与 1024 字节栈存于对象内，不新增 RTOS 堆分配；线程名为 `EthLink`，固定优先级为 `osPriorityBelowNormal`。
-- **平台线程优先级必须严格低于宿主 ETH RX 线程**。当前适配所依据的 RX 路径在 `osPriorityRealtime` 线程中调用 `HAL_ETH_ReadData()` 且不持有 LwIP core lock；仅有 core lock 不足以保护 RX 与 MAC 启停的交错。不得提高平台线程优先级，也不能把这一优先级约束当成任意线程模型的通用同步保证。
+- **平台线程优先级必须严格低于宿主 ETH RX 线程**。对于调用 `HAL_ETH_ReadData()` 且不持有 LwIP core lock 的 RX 路径，仅有 core lock 不足以保护 RX 与 MAC 启停的交错。不得提高平台线程优先级，也不能把这一优先级约束当成任意线程模型的通用同步保证。
 - MAC Get/Set/Start/Stop 与 netif link 变更在 LwIP core lock 内执行；PHY 的 start/readLink/acknowledgeInterrupt 始终在锁外执行。平台不持有自身互斥体。
 - 所有 PHY/MAC/netif 管理操作在平台线程中串行执行；宿主必须继续满足 PHY 共享总线串行化约束。
 - PHY 事件回调与 `notifyTxComplete()` 可由 ISR 调用，只置线程标志，不访问 PHY/MAC/HAL。线程 ID 尚未发布或已清空时，TX 通知为空操作。
