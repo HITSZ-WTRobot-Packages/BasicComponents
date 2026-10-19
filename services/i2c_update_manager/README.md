@@ -1,76 +1,25 @@
 # I2C Update Manager
 
-该目录提供两层抽象：
+`services::I2CUpdateManager` 在单个 CMSIS-RTOS v2 后台线程中串行调度同一 I2C 总线的周期设备，依赖 [I2C DMA Driver](../../bsp/i2c_driver/README.md)。它不是精确实时采样时钟，不保证严格周期。
 
-- `I2CDevice`：面向周期采样设备的通用基类
-- `I2CUpdateManager`：单总线周期调度器
+## 设备模型与数据有效性
 
-## I2CDevice
+`I2CDevice` 提供 Trigger → Wait → Read 的更新模型。设备实现初始化/探活与读取缓存；需要触发转换的设备可覆写触发与转换等待钩子。返回 `Pending` 时，调度器等待该设备的转换期限，同时可服务同一总线上的其他设备。
 
-`I2CDevice` 内置统一的三段状态机：
+初始化成功、在线与数据有效是不同概念，初始化成功不表示已有有效采样。使用方通过 `hasValidData()` 和 `isDataFresh(now_ms, stale_ms)` 判断缓存可用性；成功更新使数据有效，失败使数据失效。子类若还有独立缓存标记，应通过 `onDataInvalidated()` 同步清理，不能只检查旧缓存内容。
 
-- `Trigger`
-- `Wait`
-- `Read`
+方法、时间戳和状态转换的精确契约见 [I2CDevice.hpp](I2CDevice.hpp) 的 Doxygen，不在 README 复制内部字段或逐状态实现。
 
-子类只需要实现：
+## 注册、资源与线程归属
 
-- `init()`
-- `onTrigger()`
-- `conversionMs()`
-- `onRead()`
+- 调度器借用总线及设备对象；它们必须覆盖后台访问的整个使用期。
+- 最多注册 8 个设备；`registerDevice()` 只能在 `start()` 前调用，不支持运行期动态注册或反注册。启动后调度表视为只读。
+- 每条总线由对应调度线程独占，不得让其他线程绕过 manager 并发访问同一 `I2CBusDMA`。
+- 周期、初始相位、单次事务超时及线程配置由调用方提供；RTOS、DMA 和 I2C 硬件配置由宿主维护，遵循底层驱动前提。
+- `stop()` 是退出请求，不是线程 join；不能把调用返回当作可以立即销毁借用资源的保证。
 
-## 数据有效性语义
+## 调度语义
 
-父类统一维护设备侧的数据有效性：
+设备等待转换时让出总线。完成一轮后，manager 跳过已错过的历史周期，推进到未来最近的周期点，不连续补跑 backlog；这保留基本周期相位并避免恢复后短时占满总线，但不构成精确时序保证。
 
-- `markSuccess()` 会把 `data_valid_` 置为 `true`
-- `markFailure()` 会把 `data_valid_` 置为 `false`
-
-对外可以通过：
-
-- `hasValidData()`
-- `isDataFresh(now_ms, stale_ms)`
-
-来判断最近缓存是否还能使用。
-
-如果子类还维护了自己的缓存有效位，可以重写：
-
-- `onDataInvalidated()`
-
-在父类判定失败时同步清理自己的缓存标记。
-
-## I2CUpdateManager
-
-`I2CUpdateManager` 持有一张设备表，并在后台 CMSIS-RTOS v2 线程中串行推进每个设备。
-
-当前实现不支持运行期动态注册或反注册设备：
-
-- `registerDevice()` 只能在 `start()` 前调用
-- 一旦后台任务启动，调度表就视为只读
-
-这样做是为了避免注册流程与后台任务并发读写 `entries_` / `entry_count_`。
-
-当设备进入 `Pending` 时，manager 会把 `next_due_ms` 暂时推到：
-
-- `conversionDeadlineMs()`
-
-这样等待窗口可以让给同一条总线上的其他设备。
-
-## 周期调度策略
-
-设备完成一轮更新后，manager 不再补跑已经错过的历史周期，而是直接跳到未来最近的周期点。
-
-这样做的目的是：
-
-- 避免线程卡顿后连续 replay backlog
-- 保留周期相位的基本一致性
-- 避免单个设备恢复后短时间占满整条总线
-
-## 新设备接入建议
-
-1. 在子类里实现 `init()` 做最小探活
-2. 如果设备需要显式触发采样，实现 `onTrigger()`
-3. 在 `onRead()` 中更新自己的缓存
-4. 如果维护了额外的缓存有效标记，实现 `onDataInvalidated()`
-5. 在 `start()` 前把设备注册到对应总线的 `I2CUpdateManager`
+接入时先实现设备协议钩子与缓存有效性，再于启动前注册设备并检查注册/启动结果。调度接口和资源参数见 [I2CUpdateManager.hpp](I2CUpdateManager.hpp) 的 Doxygen。
