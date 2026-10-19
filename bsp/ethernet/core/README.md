@@ -5,7 +5,7 @@
 ## 生命周期与总线归属
 
 - `start()` 阻塞启动并按请求配置重建，可重复调用；成功仅表示驱动就绪，不表示链路建立。
-- `status()` 反映最近一次启动结果。未成功启动时操作返回 `NotInitialized`，不访问总线、不修改输出。
+- `status()` 保留最近一次启动结果，或后续 `configureLink()` / `restartAutoNegotiation()` 写失败导致的粘性 `WriteError`。`status() != Ok` 时，总线操作方法返回 `NotInitialized`，不访问总线、不修改输出；再次调用 `start()` 可重建并恢复。
 - 正常断链不是读取错误：链路查询成功时可返回 `Down`；查询失败不改写输出。
 - 链路配置支持自动协商或强制模式，能力由具体器件限定；显式重启协商不等待协商完成。
 - 所有总线操作由调用方串行化。本接口没有线程创建、停止或 join 机制；与 [LwipPlatform](../lwip_platform/README.md) 配合时，由平台链路线程串行访问 PHY。
