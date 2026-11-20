@@ -29,19 +29,15 @@ float PIDMotor::calc(const float& ref, const float& fdb, const float& ff)
 
     const float output_pd_ff = std::clamp(p + d + ff, -cfg_.abs_output_max, cfg_.abs_output_max);
 
-    // 留出给积分项的剩余空间，避免积分项把总输出再次推爆。
-    float i_limit = cfg_.abs_output_max - std::fabsf(output_pd_ff);
-    if (i_limit < 0.0f)
-        i_limit = 0.0f;
+    // 留出给积分项的剩余空间，避免积分项把总输出再次推爆。积分范围应当不对称，便于处理正负方向的不同限制。
+    const float i_min = -cfg_.abs_output_max - output_pd_ff;
+    const float i_max =  cfg_.abs_output_max - output_pd_ff;
 
     // 积分项直接累计 Ki * error，方便后续做上限控制。
     integral_ += cfg_.Ki * error_;
 
     // 对积分项做独立限幅，相当于简单的 anti-windup。
-    if (integral_ > i_limit)
-        integral_ = i_limit;
-    else if (integral_ < -i_limit)
-        integral_ = -i_limit;
+    integral_ = std::clamp(integral_, i_min, i_max);
 
     // 最终输出 = P + D + I + FF。
     output_ = output_pd_ff + integral_;
